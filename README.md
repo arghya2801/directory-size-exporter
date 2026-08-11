@@ -37,3 +37,19 @@ go test ./...
 go test -race ./...
 go vet ./...
 ```
+
+## Build
+
+```text
+go build -o dist/directory-size-exporter ./cmd/directory-size-exporter
+```
+
+For local development, run `go run ./cmd/directory-size-exporter --path.target=/path/to/logs`.
+
+Source is organized as follows:
+
+```text
+cmd/directory-size-exporter/   executable entry point and CLI flags
+internal/exporter/             collector, HTTP endpoint, and tests
+dist/                          local build output (ignored by Git)
+```

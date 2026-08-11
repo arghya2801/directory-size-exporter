@@ -1,4 +1,4 @@
-package main
+package exporter
 
 import (
 	"context"
@@ -21,7 +21,6 @@ func TestScanCountsOnlyRegularFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nested, "second.log"), []byte("12345"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	collector := NewDirectoryCollector([]string{target}, true)
 	if !collector.ScanAll(context.Background(), 0, nil) {
 		t.Fatal("scan was unexpectedly skipped")
@@ -33,7 +32,6 @@ func TestScanCountsOnlyRegularFiles(t *testing.T) {
 	if stats.LastScrapeSuccess != 1 || stats.LastScanErrors != 0 || stats.LastScanTimestamp == 0 {
 		t.Fatalf("unexpected scan status: %+v", stats)
 	}
-
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(collector)
 	if _, err := registry.Gather(); err != nil {
@@ -59,7 +57,6 @@ func TestScanAllSkipsConcurrentRun(t *testing.T) {
 		t.Fatal("concurrent scan was not skipped")
 	}
 }
-
 func TestCancelledScanIsReportedAsFailed(t *testing.T) {
 	target := t.TempDir()
 	collector := NewDirectoryCollector([]string{target}, false)
@@ -70,24 +67,22 @@ func TestCancelledScanIsReportedAsFailed(t *testing.T) {
 		t.Fatalf("cancelled scan was not reported as failed: %+v", stats)
 	}
 }
-
 func TestNormalizeTargets(t *testing.T) {
 	base := t.TempDir()
-	targets, err := normalizeTargets([]string{base, "  " + base + "  "})
+	targets, err := NormalizeTargets([]string{base, "  " + base + "  "})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(targets) != 1 || targets[0] != base {
 		t.Fatalf("unexpected targets: %#v", targets)
 	}
-	if _, err := normalizeTargets([]string{""}); err == nil {
+	if _, err := NormalizeTargets([]string{""}); err == nil {
 		t.Fatal("empty target was accepted")
 	}
-	if _, err := normalizeTargets(nil); err == nil {
+	if _, err := NormalizeTargets(nil); err == nil {
 		t.Fatal("missing targets were accepted")
 	}
 }
-
 func cachedStats(t *testing.T, collector *DirectoryCollector, target string) TargetStats {
 	t.Helper()
 	collector.statsMu.RLock()

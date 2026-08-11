@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/local/directory-size-exporter/internal/exporter"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/promslog"
 	"github.com/prometheus/exporter-toolkit/web"
 )
@@ -22,25 +22,11 @@ const (
 	shutdownTimeout     = 10 * time.Second
 )
 
-func newHTTPServer(registry *prometheus.Registry) *http.Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
-	return &http.Server{
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    8 << 10,
-	}
-}
-
 func main() {
 	var targets targetList
-	var legacyTargets string
-	var scanInterval time.Duration
-	var scanTimeout time.Duration
+	var legacyTargets, listenAddress string
+	var scanInterval, scanTimeout time.Duration
 	var enableCounts bool
-	var listenAddress string
 
 	flag.Var(&targets, "path.target", "Directory to monitor. Repeat this flag for multiple directories.")
 	flag.StringVar(&legacyTargets, "path.targets", "", "Deprecated comma-separated target directories; use --path.target repeatedly.")
@@ -52,9 +38,9 @@ func main() {
 
 	logger := promslog.New(&promslog.Config{})
 	if legacyTargets != "" {
-		targets = append(targets, splitLegacyTargets(legacyTargets)...)
+		targets = append(targets, exporter.SplitLegacyTargets(legacyTargets)...)
 	}
-	normalized, err := normalizeTargets(targets)
+	normalized, err := exporter.NormalizeTargets(targets)
 	if err != nil {
 		logger.Error("Invalid target configuration", "err", err)
 		os.Exit(2)
@@ -68,24 +54,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	collector := NewDirectoryCollector(normalized, enableCounts)
+	collector := exporter.NewDirectoryCollector(normalized, enableCounts)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(collector)
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	collector.Start(ctx, scanInterval, scanTimeout, logger)
 
-	server := newHTTPServer(registry)
+	server := exporter.NewHTTPServer(registry)
 	addresses := []string{listenAddress}
-	systemdSocket := false
-	noWebConfig := "" // A blank toolkit configuration deliberately disables TLS and authentication.
-	toolkitFlags := &web.FlagConfig{
-		WebListenAddresses: &addresses,
-		WebSystemdSocket:   &systemdSocket,
-		WebConfigFile:      &noWebConfig,
-	}
-
+	systemdSocket, noWebConfig := false, ""
+	toolkitFlags := &web.FlagConfig{WebListenAddresses: &addresses, WebSystemdSocket: &systemdSocket, WebConfigFile: &noWebConfig}
 	errCh := make(chan error, 1)
 	go func() { errCh <- web.ListenAndServe(server, toolkitFlags, logger) }()
 	logger.Info("Directory size exporter started", "address", listenAddress, "targets", len(normalized))
@@ -107,11 +86,7 @@ func main() {
 	}
 }
 
-// targetList supports repeatable --path.target flags, including paths containing commas.
 type targetList []string
 
-func (t *targetList) String() string { return fmt.Sprint([]string(*t)) }
-func (t *targetList) Set(value string) error {
-	*t = append(*t, value)
-	return nil
-}
+func (t *targetList) String() string         { return fmt.Sprint([]string(*t)) }
+func (t *targetList) Set(value string) error { *t = append(*t, value); return nil }

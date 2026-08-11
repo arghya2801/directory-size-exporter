@@ -1,9 +1,11 @@
-package main
+// Package exporter implements cached directory-size collection and HTTP metrics serving.
+package exporter
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,9 +14,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// TargetStats is a snapshot from the most recently completed scan of one target.
 type TargetStats struct {
 	SizeBytes         int64
 	FilesTotal        int64
@@ -29,11 +31,10 @@ type TargetStats struct {
 type DirectoryCollector struct {
 	targets      []string
 	enableCounts bool
-
-	statsMu  sync.RWMutex
-	cache    map[string]TargetStats
-	scanMu   sync.Mutex
-	scanning atomic.Bool
+	statsMu      sync.RWMutex
+	cache        map[string]TargetStats
+	scanMu       sync.Mutex
+	scanning     atomic.Bool
 
 	scanErrorsTotal atomic.Uint64
 
@@ -81,7 +82,6 @@ func (c *DirectoryCollector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- c.dirsDesc
 	}
 }
-
 func (c *DirectoryCollector) Collect(ch chan<- prometheus.Metric) {
 	c.statsMu.RLock()
 	snapshot := make(map[string]TargetStats, len(c.cache))
@@ -108,7 +108,7 @@ func (c *DirectoryCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.inProgress, prometheus.GaugeValue, value)
 }
 
-// Start runs scans asynchronously so a slow initial walk never prevents metrics serving.
+// Start runs scans asynchronously, retaining the previous snapshot during each scan.
 func (c *DirectoryCollector) Start(ctx context.Context, interval, timeout time.Duration, logger *slog.Logger) {
 	go func() {
 		for {
@@ -141,8 +141,7 @@ func (c *DirectoryCollector) ScanAll(ctx context.Context, timeout time.Duration,
 		if ctx.Err() != nil {
 			return true
 		}
-		scanCtx := ctx
-		cancel := func() {}
+		scanCtx, cancel := ctx, func() {}
 		if timeout > 0 {
 			scanCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
@@ -158,7 +157,6 @@ func (c *DirectoryCollector) ScanAll(ctx context.Context, timeout time.Duration,
 	}
 	return true
 }
-
 func (c *DirectoryCollector) scanTarget(ctx context.Context, target string) TargetStats {
 	started := time.Now()
 	stats := TargetStats{}
@@ -207,9 +205,17 @@ func (c *DirectoryCollector) scanTarget(ctx context.Context, target string) Targ
 	return stats
 }
 
-func splitLegacyTargets(raw string) []string { return strings.Split(raw, ",") }
+func NewHTTPServer(registry *prometheus.Registry) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	return &http.Server{
+		Handler: mux, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 30 * time.Second,
+		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10,
+	}
+}
 
-func normalizeTargets(raw []string) ([]string, error) {
+func SplitLegacyTargets(raw string) []string { return strings.Split(raw, ",") }
+func NormalizeTargets(raw []string) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("at least one --path.target is required")
 	}
