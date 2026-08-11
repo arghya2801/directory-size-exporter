@@ -1,0 +1,16 @@
+# Local build and release artifacts
+/dist/
+/directory-size-exporter
+/directory-size-exporter.exe
+*.test
+*.out
+
+# Coverage output
+/coverage/
+coverage.txt
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

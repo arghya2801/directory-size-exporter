@@ -1,238 +1,117 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
-	"sync"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/exporter-toolkit/web"
 	"github.com/prometheus/common/promslog"
-	"log/slog"
+	"github.com/prometheus/exporter-toolkit/web"
 )
 
-// TargetStats holds the in-memory aggregated metrics for a single directory.
-type TargetStats struct {
-	SizeBytes         int64
-	FilesTotal        int64
-	DirsTotal         int64
-	ScrapeDurationSec float64
-	ScrapeErrorsTotal int64
-	LastScrapeSuccess float64
-}
+const (
+	defaultScanInterval = 5 * time.Minute
+	shutdownTimeout     = 10 * time.Second
+)
 
-// DirectoryCollector implements the prometheus.Collector interface.
-type DirectoryCollector struct {
-	targets      []string
-	enableCounts bool
-
-	statsLock sync.RWMutex
-	cache     map[string]TargetStats
-
-	// Metric Descriptors
-	sizeDesc     *prometheus.Desc
-	filesDesc    *prometheus.Desc
-	dirsDesc     *prometheus.Desc
-	durationDesc *prometheus.Desc
-	errorsDesc   *prometheus.Desc
-	successDesc  *prometheus.Desc
-}
-
-func NewDirectoryCollector(targets []string, enableCounts bool) *DirectoryCollector {
-	labels := []string{"target_path"}
-	return &DirectoryCollector{
-		targets:      targets,
-		enableCounts: enableCounts,
-		cache:        make(map[string]TargetStats),
-
-		sizeDesc: prometheus.NewDesc(
-			"dir_exporter_size_bytes",
-			"Total size of the directory in bytes.",
-			labels, nil,
-		),
-		filesDesc: prometheus.NewDesc(
-			"dir_exporter_files_total",
-			"Total number of regular files in the target directory.",
-			labels, nil,
-		),
-		dirsDesc: prometheus.NewDesc(
-			"dir_exporter_directories_total",
-			"Total number of subdirectories inside the target directory.",
-			labels, nil,
-		),
-		durationDesc: prometheus.NewDesc(
-			"dir_exporter_scrape_duration_seconds",
-			"Time taken to scan the target directory in seconds.",
-			labels, nil,
-		),
-		errorsDesc: prometheus.NewDesc(
-			"dir_exporter_scrape_errors_total",
-			"Total number of file/directory read errors encountered during scan.",
-			labels, nil,
-		),
-		successDesc: prometheus.NewDesc(
-			"dir_exporter_last_scrape_success",
-			"1 if the last background scan was successful, 0 otherwise.",
-			labels, nil,
-		),
+func newHTTPServer(registry *prometheus.Registry) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	return &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8 << 10,
 	}
-}
-
-func (c *DirectoryCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- c.sizeDesc
-	ch <- c.durationDesc
-	ch <- c.errorsDesc
-	ch <- c.successDesc
-
-	if c.enableCounts {
-		ch <- c.filesDesc
-		ch <- c.dirsDesc
-	}
-}
-
-func (c *DirectoryCollector) Collect(ch chan<- prometheus.Metric) {
-	c.statsLock.RLock()
-	defer c.statsLock.RUnlock()
-
-	for target, stats := range c.cache {
-		ch <- prometheus.MustNewConstMetric(c.sizeDesc, prometheus.GaugeValue, float64(stats.SizeBytes), target)
-		ch <- prometheus.MustNewConstMetric(c.durationDesc, prometheus.GaugeValue, stats.ScrapeDurationSec, target)
-		ch <- prometheus.MustNewConstMetric(c.errorsDesc, prometheus.CounterValue, float64(stats.ScrapeErrorsTotal), target)
-		ch <- prometheus.MustNewConstMetric(c.successDesc, prometheus.GaugeValue, stats.LastScrapeSuccess, target)
-
-		if c.enableCounts {
-			ch <- prometheus.MustNewConstMetric(c.filesDesc, prometheus.GaugeValue, float64(stats.FilesTotal), target)
-			ch <- prometheus.MustNewConstMetric(c.dirsDesc, prometheus.GaugeValue, float64(stats.DirsTotal), target)
-		}
-	}
-}
-
-func (c *DirectoryCollector) ScanAll(logger *slog.Logger) {
-	for _, target := range c.targets {
-		stats := c.scanTarget(target, logger)
-		c.statsLock.Lock()
-		c.cache[target] = stats
-		c.statsLock.Unlock()
-	}
-}
-
-func (c *DirectoryCollector) scanTarget(targetDir string, logger *slog.Logger) TargetStats {
-	start := time.Now()
-	stats := TargetStats{LastScrapeSuccess: 1}
-
-	err := filepath.WalkDir(targetDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			stats.ScrapeErrorsTotal++
-			logger.Debug("Error accessing path", "path", path, "err", err)
-			return nil // Skip unreadable paths, keep scanning
-		}
-
-		// Skip symbolic links completely per requirements
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		if d.IsDir() {
-			if path != targetDir {
-				stats.DirsTotal++
-			}
-			return nil
-		}
-
-		// Process regular files
-		info, err := d.Info()
-		if err != nil {
-			stats.ScrapeErrorsTotal++
-			return nil
-		}
-
-		stats.SizeBytes += info.Size()
-		stats.FilesTotal++
-
-		return nil
-	})
-
-	stats.ScrapeDurationSec = time.Since(start).Seconds()
-
-	if err != nil {
-		stats.LastScrapeSuccess = 0
-		logger.Error("Failed to walk directory completely", "target", targetDir, "err", err)
-	}
-
-	return stats
 }
 
 func main() {
-	var (
-		rawTargets    = flag.String("path.targets", "", "Comma-separated list of target directory paths to monitor.")
-		scanInterval  = flag.Duration("scan.interval", 5*time.Minute, "Interval between background directory scans.")
-		listenAddress = flag.String("web.listen-address", ":9115", "Address on which to expose metrics and web interface.")
-		webConfigFile = flag.String("web.config.file", "", "Path to configuration file that can enable TLS or authentication.")
-		
-		enableCounts  = flag.Bool("collector.file-counts", true, "Enable file and subdirectory count metrics.")
-	)
+	var targets targetList
+	var legacyTargets string
+	var scanInterval time.Duration
+	var scanTimeout time.Duration
+	var enableCounts bool
+	var listenAddress string
 
+	flag.Var(&targets, "path.target", "Directory to monitor. Repeat this flag for multiple directories.")
+	flag.StringVar(&legacyTargets, "path.targets", "", "Deprecated comma-separated target directories; use --path.target repeatedly.")
+	flag.DurationVar(&scanInterval, "scan.interval", defaultScanInterval, "Interval between directory scans.")
+	flag.DurationVar(&scanTimeout, "scan.timeout", 0, "Maximum duration of one scan; 0 disables the timeout.")
+	flag.BoolVar(&enableCounts, "collector.file-counts", false, "Expose regular-file and subdirectory count metrics.")
+	flag.StringVar(&listenAddress, "web.listen-address", ":9115", "Address on which to expose Prometheus metrics.")
 	flag.Parse()
 
 	logger := promslog.New(&promslog.Config{})
-
-	if *rawTargets == "" {
-		logger.Error("No target directories specified. Use --path.targets=/path1,/path2")
-		os.Exit(1)
+	if legacyTargets != "" {
+		targets = append(targets, splitLegacyTargets(legacyTargets)...)
+	}
+	normalized, err := normalizeTargets(targets)
+	if err != nil {
+		logger.Error("Invalid target configuration", "err", err)
+		os.Exit(2)
+	}
+	if scanInterval <= 0 {
+		logger.Error("scan.interval must be greater than zero")
+		os.Exit(2)
+	}
+	if scanTimeout < 0 {
+		logger.Error("scan.timeout cannot be negative")
+		os.Exit(2)
 	}
 
-	targets := strings.Split(*rawTargets, ",")
-	for i := range targets {
-		targets[i] = strings.TrimSpace(targets[i])
-	}
+	collector := NewDirectoryCollector(normalized, enableCounts)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
 
-	collector := NewDirectoryCollector(targets, *enableCounts)
-	prometheus.MustRegister(collector)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	collector.Start(ctx, scanInterval, scanTimeout, logger)
 
-	// Perform an initial scan on startup
-	logger.Info("Starting initial directory scan", "targets", len(targets))
-	collector.ScanAll(logger)
-
-	// Start background ticker loop
-	go func() {
-		ticker := time.NewTicker(*scanInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			logger.Info("Executing scheduled directory scan")
-			collector.ScanAll(logger)
-		}
-	}()
-
-	http.Handle("/metrics", promhttp.Handler())
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<html>
-			<head><title>Directory Size Exporter</title></head>
-			<body>
-			<h1>Directory Size Exporter</h1>
-			<p><a href="/metrics">Metrics</a></p>
-			</body>
-			</html>`))
-	})
-
-	server := &http.Server{}
-	
-	// Set up exporter-toolkit flags
+	server := newHTTPServer(registry)
+	addresses := []string{listenAddress}
+	systemdSocket := false
+	noWebConfig := "" // A blank toolkit configuration deliberately disables TLS and authentication.
 	toolkitFlags := &web.FlagConfig{
-		WebListenAddresses: &[]string{*listenAddress},
-		WebSystemdSocket:   func(b bool) *bool { return &b }(false),
-		WebConfigFile:      webConfigFile,
+		WebListenAddresses: &addresses,
+		WebSystemdSocket:   &systemdSocket,
+		WebConfigFile:      &noWebConfig,
 	}
 
-	logger.Info("Starting HTTP server", "address", *listenAddress)
-	
-	// Use the exporter-toolkit to start the server
-	if err := web.ListenAndServe(server, toolkitFlags, logger); err != nil {
-		logger.Error("HTTP server failed", "err", err)
-		os.Exit(1)
+	errCh := make(chan error, 1)
+	go func() { errCh <- web.ListenAndServe(server, toolkitFlags, logger) }()
+	logger.Info("Directory size exporter started", "address", listenAddress, "targets", len(normalized))
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server failed", "err", err)
+		}
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.Error("HTTP server shutdown failed", "err", err)
+		}
+		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("HTTP server stopped with an error", "err", err)
+		}
 	}
+}
+
+// targetList supports repeatable --path.target flags, including paths containing commas.
+type targetList []string
+
+func (t *targetList) String() string { return fmt.Sprint([]string(*t)) }
+func (t *targetList) Set(value string) error {
+	*t = append(*t, value)
+	return nil
 }
