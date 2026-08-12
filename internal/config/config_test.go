@@ -23,7 +23,7 @@ func parse(t *testing.T, args []string) (*Registry, error) {
 	app := kingpin.New("test", "test").Terminate(nil)
 	app.Writer(io.Discard)
 	registry.RegisterFlags(app)
-	if _, err := app.Parse(args); err != nil {
+	if _, err := app.Parse(registry.NormalizeArgs(args)); err != nil {
 		return nil, err
 	}
 	return registry, registry.Resolve(registry.Config().ConfigFile)
@@ -146,6 +146,51 @@ func sourceOf(t *testing.T, registry *Registry, name string) Source {
 	}
 	t.Fatalf("no field named %s", name)
 	return ""
+}
+
+// TestBooleanFlagsAcceptBothSpellings covers a kingpin behaviour that is easy to trip over:
+// a boolean flag is valueless, so --flag=true leaves "true" behind as a stray positional argument
+// and parsing fails with "unexpected true". Both spellings are supported here because --flag=value
+// is what most operators reach for.
+func TestBooleanFlagsAcceptBothSpellings(t *testing.T) {
+	for _, testCase := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--collector.file-counts=true"}, true},
+		{[]string{"--collector.file-counts"}, true},
+		{[]string{"--collector.file-counts=false"}, false},
+		{[]string{"--no-collector.file-counts"}, false},
+		{[]string{"--collector.file-counts=on"}, true},
+		{[]string{"--collector.file-counts=0"}, false},
+	} {
+		t.Run(strings.Join(testCase.args, " "), func(t *testing.T) {
+			registry, err := parse(t, append([]string{"--path.target=/x"}, testCase.args...))
+			if err != nil {
+				t.Fatalf("parsing %v failed: %v", testCase.args, err)
+			}
+			if got := registry.Config().CollectorFileCounts; got != testCase.want {
+				t.Errorf("value = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeArgs_LeavesNonBooleanFlagsAlone(t *testing.T) {
+	registry := NewRegistry()
+	args := []string{
+		"--scan.interval=5m",             // duration, must survive verbatim
+		"--collector.disk-usage=true",    // tristate, kingpin handles the value itself
+		"--path.target=/data/logs=weird", // value containing an equals sign
+		"--collector.file-counts=maybe",  // not boolean-looking, kingpin should report it
+		"positional",
+	}
+	got := registry.NormalizeArgs(args)
+	for i := range args {
+		if got[i] != args[i] {
+			t.Errorf("arg %d rewritten to %q, want %q", i, got[i], args[i])
+		}
+	}
 }
 
 func TestEnvNameDerivation(t *testing.T) {

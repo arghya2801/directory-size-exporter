@@ -193,6 +193,43 @@ func (f *field) helpWithEnv() string {
 	return f.help + " (env: " + EnvName(f.name) + ")"
 }
 
+// NormalizeArgs rewrites --flag=true and --flag=false into the forms kingpin actually accepts for
+// boolean flags.
+//
+// kingpin treats a boolean flag as valueless: it consumes --flag and --no-flag, and hardcodes the
+// result to true or false. The tokenizer has already split --flag=true into two tokens by then, so
+// the value is left behind as a stray positional argument and parsing dies with the memorably
+// unhelpful "unexpected true".
+//
+// Since --flag=value is the form most operators reach for, and the form that appears throughout
+// this project's own documentation, both spellings are accepted here rather than leaving a
+// papercut that only shows up when someone is already debugging something else. Values that are
+// not recognisably boolean are passed through untouched so kingpin still reports them.
+func (r *Registry) NormalizeArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		name, value, found := strings.Cut(arg, "=")
+		if !found || !strings.HasPrefix(name, "--") {
+			out = append(out, arg)
+			continue
+		}
+		f, known := r.byName[strings.TrimPrefix(name, "--")]
+		if !known || f.kind != kindBool {
+			out = append(out, arg)
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true", "1", "yes", "on":
+			out = append(out, name)
+		case "false", "0", "no", "off":
+			out = append(out, "--no-"+strings.TrimPrefix(name, "--"))
+		default:
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
 // Resolve applies YAML and environment values beneath any flags the user set explicitly, in
 // precedence order flag > environment > YAML > default. It must be called after kingpin parsing.
 func (r *Registry) Resolve(configPath string) error {

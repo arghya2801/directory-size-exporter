@@ -1,6 +1,7 @@
 # Session — Production Hardening for High-Volume Directory Monitoring
 
 Full plan: `~/.claude/plans/i-have-made-a-dapper-canyon.md`
+Design rationale now lives in `ARCHITECTURE.md`; operator docs in `README.md`.
 
 ## Goal
 
@@ -8,189 +9,80 @@ Make the exporter safe, accurate, observable and operable for continuous per-dir
 monitoring on trading hosts carrying multi-TB / 10M+ file log trees, without disturbing the
 latency-sensitive application sharing the host.
 
-## Defects being fixed
+## Status: all phases complete
 
-| # | Defect | Location | Phase |
-|---|---|---|---|
-| D1 | Partial/timed-out scan overwrites a good size with a partial one | `collector.go:151-153` | P-1, P2 |
-| D2 | Missing root caches `SizeBytes=0` | `collector.go:163-172` | P-1, P4 |
-| D3 | **Symlinked target root reports 0 bytes with `last_scan_success=1`** (fails green) | `collector.go:174-176` | P-1 |
-| D4 | Zero-seeded cache emits genuine `0` before the first scan completes | `collector.go:66-68` | P-1 |
-| D5 | Sorted+materialized ReadDir, per-entry `Join` alloc, full-path `lstat` per file | `collector.go:163-196` | P3 |
-| D6 | `ctx.Err()` per entry takes the context mutex | `collector.go:164` | P3 |
-| D7 | Hard links double-counted; mounts crossed; overlapping targets rescanned | `collector.go:191,218-241` | P3 |
-| D8 | `promslog.AddFlags` never called — no `--log.level`/`--log.format` | `main.go:39` | P5 |
-| D9 | `WebConfigFile` hard-coded `""` — TLS/auth unreachable | `main.go:66-67` | P4 |
-| D10 | `scan_in_progress` global not per-target; single-flight rejection invisible | `collector.go:64,134` | P3 |
+| Phase | Work | Commit |
+|---|---|---|
+| P-1 | Hotfix for the false-zero defects on the old code | `ea5e756` |
+| P0 | Dependency gate + cross-GOOS CI matrix | `2dbbfea` |
+| P1 | `internal/fsstat` platform boundary + `FakeFS` | `2dbbfea` |
+| P2 | `internal/state` retention rules (test-first) | `5d6508e` |
+| P3 | `internal/scan` bounded-parallel engine and walker | `6a33fcb` |
+| P4 | `internal/collector` + `internal/server` | `d78489b` |
+| P5 | `internal/config` + `internal/targets` | `1c151cc` |
+| P6/P7 | `main.go` rewiring, `internal/schedprio`, docs | this commit |
 
-## Checklist
+## Defects fixed
 
-### P-1 — Hotfix on current code (own commit) — **DONE**
-- [x] Split `targetState` into `good` (error-free scans only) and `last` (every attempt)
-- [x] Write the good value only when `LastScrapeSuccess == 1` (D1)
-- [x] Delete zero-seeding loop; `Collect` emits size only when a good value exists (D4)
-- [x] `EvalSymlinks` + `IsDir` check on the target root before walking (D3)
-- [x] `failedScan` helper so an unresolvable/non-directory root reports an error, not zero bytes
-- [x] Rewrote `TestMissingTargetIsReportedAsFailedScan` (it asserted the bug)
-- [x] Added `TestFailedScanRetainsLastGoodSize`, `TestNoSizeSeriesBeforeFirstScan`,
-      `TestSymlinkedTargetRootIsResolved`, `TestNonDirectoryTargetIsReportedAsFailedScan`
-- [x] `go test ./...`, `go vet ./...`, cross-GOOS build all green
+| # | Defect | Fixed in |
+|---|---|---|
+| D1 | Partial/timed-out scan overwrote a good size | P-1, then structurally in P2 |
+| D2 | Missing root cached `SizeBytes=0` | P-1, P4 |
+| D3 | **Symlinked target root reported 0 bytes with `success=1`** (failed green) | P-1, P5 |
+| D4 | Zero-seeded cache emitted a real `0` before the first scan | P-1, P2 |
+| D5 | Sorted+materialised ReadDir, per-entry `Join`, full-path `lstat` | P3 |
+| D6 | `ctx.Err()` per entry took the context mutex | P3 |
+| D7 | Hard links double-counted; mounts crossed; overlaps rescanned | P3, P5 |
+| D8 | `promslog.AddFlags` never called | P6 |
+| D9 | `WebConfigFile` hard-coded `""` — TLS/auth unreachable | P4, P6 |
+| D10 | `scan_in_progress` global, single-flight rejection invisible | P3, P4 |
 
-### P0 — Dependencies and CI — **DONE**
-- [x] **Dependency gate cleared.** Proxy reachable; `go get` resolved every module the plan needs:
-      `kingpin/v2 v2.4.0` (pulling `alecthomas/units` and `xhit/go-str2duration/v2`) and
-      `yaml.v3 v3.0.1`. `x/time v0.15.0`, `x/sync v0.22.0`, `x/sys v0.47.0` are already in the
-      module graph. All are now warm in the local module cache.
-- [x] Reverted `go.mod`/`go.sum` afterwards — an unused requirement is noise that `go mod tidy`
-      strips anyway. P5 adds kingpin/yaml and P1/P7 promote `x/sys` **when the imports land**.
-- [x] `.github/workflows/ci.yml`: race job on Linux + cross-platform matrix
-      (linux/amd64, linux/arm64, windows/amd64) building and vetting every GOOS, plus a
-      `go mod tidy` drift check.
-
-### P1 — `internal/fsstat` — **DONE**
-- [x] `fsstat.go`: `FS` + `Dir` interfaces, `FileStat`, `FSInfo`, `Capability` bits,
-      compile-time `var _ FS = systemFS{}` assertion so a missing platform stub fails at compile
-      time on the offending GOOS rather than at link time
-- [x] `fsstat_linux.go`: `openat(O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC)`, `fstatat` against the held
-      dirfd with a reused `unix.Stat_t`, `statfs`, `AllocBytes = Blocks * 512`, mountpoint via
-      `Dev` walk-up, fstype magic table. Arch-portable conversions (builds on arm64).
-- [x] `fsstat_windows.go`: `GetDiskFreeSpaceEx` + `GetVolumePathName` + `GetVolumeInformation`;
-      `CapAllocBytes`/`CapInode` deliberately withheld
-- [x] `fsstat_other.go`: caps 0, everything returns `ErrUnsupported` — still builds and runs
-- [x] `fake.go`: in-memory `FS` with shuffled reads, synthetic mega-directories, per-path
-      open/stat errors, before-open/read/stat hooks (for hung-mount tests), open-dir high-water
-      mark, and bare-name assertion. Concurrency-safe.
-- [x] Tests: portable (13), linux-only (9), windows-only (4). Windows suite green locally;
-      linux + arm64 + darwin all type-check via `GOOS=... go vet`.
-- [x] `x/sys` promoted to a direct dependency by `go mod tidy` as the import landed.
-
-**Design note — no device-node name.** `FSInfo.Device` is the kernel device id (`major:minor`),
-not `/dev/sda1`. Resolving a device name needs `/proc/self/mountinfo`, which races with concurrent
-mounts and shows the *host's* mount tree from inside a container. `Mountpoint` is the intended join
-key between a target and its filesystem, so the device name is not needed for any planned query.
-
-### P2 — `internal/state` (test-first) — **DONE**
-- [x] `store_test.go` written **before** `store.go` and confirmed red (undefined symbols)
-- [x] `TestStore_RetentionTable`: one subtest per row of the FR3 table
-- [x] `store.go`: pure logic, no prometheus, no filesystem, injected clock
-- [x] Nothing published before the first `complete`; `Has*` flags carry absent-vs-zero
-- [x] Delta spans only completed scans, with `DeltaIntervalSeconds` alongside it
-- [x] `PublishPartial` publishes the size but freezes delta **and** the byte counters
-- [x] `StaleAfter` withdraws the measurement while keeping status visible
-- [x] Per-target in-flight tracking (`MarkScanStarted`) serving the previous good value
-- [x] `SetTargets` retains survivors and garbage-collects removed targets
-- [x] Snapshots deep-copy their maps, so a scrape cannot mutate store state
-- [x] `TestStore_ConcurrentApplyAndSnapshot` (only meaningful under `-race`, i.e. Linux CI)
-
-**Design note — `published` vs `good`.** Two separate measurements are kept per target. `good` moves
-only on a completed scan and is the delta baseline; `published` is what the collector renders. They
-are identical except under `--scan.publish-partial`, where the operator sees a rough partial number
-while growth data stays anchored to the last clean scan. Collapsing them into one field would make
-`publish-partial` silently corrupt every capacity forecast.
-
-### P3 — `internal/scan` — **DONE**
-- [x] `engine.go`: one global worker pool across all targets, per-worker LIFO stacks, bounded
-      non-blocking overflow deque, `pool.close()` termination
-- [x] **Increment-before-enqueue latch invariant**, verified by mutation testing (see note below)
-- [x] Batched rate limiter (`WaitN` once per batch); burst auto-raised to `BatchSize+1`
-- [x] Per-batch cancellation via a plain `atomic.Bool`, not `ctx.Err()` (D6)
-- [x] Hard-timeout abandonment + bounded worker drain + `AbandonedWorkers` in `Stats()`
-- [x] `walk.go`: open-drain-close per directory so open fds == concurrency regardless of depth;
-      one-filesystem, hardlink dedup (`Nlink>1` only, bounded, per-target), vanished-file handling
-- [x] `errclass.go`: portable `errors.Is` first, then errno; no build tags needed
-- [x] `progress.go` heartbeats; `summary.go` one line per target per scan
-- [x] 25 tests, all green. `TestScan_NeverLogsPerFileErrors` asserts **exactly one** log record
-      for 2000 permission failures.
-
-**Verification note — the latch guard is mutation-tested.** `TestEngine_LatchDoesNotFireEarly` was
-confirmed to catch the bug: reversing `completeDir()` and `addPending()` in `engine.go` made it fail
-on run 0 with `size = 0, want 40`. That is the exact catastrophic shape — a target finalised as
-**complete** holding none of its data, which the retention rules would then publish as truth. If
-that ordering is ever touched, re-run this mutation.
-
-**Also in this phase:** added `.gitattributes` (`*.go text eol=lf`). Without it every Go file in a
-Windows working tree is reported by `gofmt -l`, which buried the two files that genuinely needed
-formatting. CI now gates on `gofmt -l`.
-
-### P4 — `internal/collector` + `internal/server` — **DONE**
-- [x] `descs.go`: every descriptor in one place, self-registering into `all` for `Describe`
-- [x] `collector.go`: renders `state.Snapshot` only — no decisions of its own, no filesystem access
-      during a scrape, so a hung mount can never slow a scrape
-- [x] `Recorder()` returns a `scan.Sink` feeding retention **and** the duration histogram together
-- [x] `filesystem.go`: `FilesystemCache` refreshed on the scan cycle (not on scrape), with the
-      statfs timeout and abandoned goroutine; capacity deduped by label set
-- [x] `self.go`: `go_*`, `process_*` (gateable) and `build_info` (never gated)
-- [x] `server.go`: landing page, `/-/healthy`, `/-/ready`, `/-/reload` (off by default, POST only)
-- [x] TLS **and** basic auth proven end-to-end through `web.Serve` with a real `--web.config.file`
-- [x] 22 tests green; `CollectAndLint` passes over the whole metric surface
-
-**Design note — checked registration.** `Describe` advertises every descriptor including gated-off
-ones. A collector that describes only part of what it emits registers *unchecked*, which silently
-forfeits the registry's duplicate-series and label-consistency checks. That surfaced immediately:
-the first run failed with 52 "unregistered descriptor" errors.
-
-**Design note — capacity is refreshed on the scan cycle, never on scrape.** `statfs` on a hung NFS
-mount blocks uninterruptibly, and a scrape must never be able to hang. Unlike directory sizes, a
-failed capacity read publishes **nothing** rather than retaining the previous value: free space is
-cheap to re-read and feeds directly into "hours until the volume fills", so a stale figure is worse
-than an absent one.
-
-**Note:** `internal/exporter/http_acceptance_test.go:49-51` still asserts `/` → 404. That is the OLD
-package, still wired to `main.go`; it is deleted in P6, so the assertion was left alone rather than
-edited twice.
-
-### P5 — `internal/config` + `internal/targets`
-- [ ] kingpin flags + `DIR_EXPORTER_*` env + strict YAML; precedence `flag > env > yaml > default`
-- [ ] `TestFlags_EveryConfigFieldHasAFlag` (reflection, prevents drift)
-- [ ] Tri-state `true|false|auto` capability gating; `true` on unsupported ⇒ exit 2
-- [ ] Startup audit lines: every setting with its source
-- [ ] Resolver: globs, `EvalSymlinks`, dedup, overlap detection, re-resolution diff, `--targets.max`
-
-### P6 — Wiring and docs
-- [ ] `main.go` reduced to wiring; SIGHUP + `/-/reload`
-- [ ] README + ARCHITECTURE.md rewrite
-- [ ] Migration note for breaking metric changes + shipped alert rules
-
-### P7 — `internal/schedprio`
-- [ ] Linux `setpriority` + `ioprio_set` per scan-worker thread under `runtime.LockOSThread`
-- [ ] `--scan.nice` (19), `--scan.io-priority` (idle); no-op elsewhere
-
-## Verification (every phase)
+## Verification
 
 ```
 go test ./...
 go vet ./...
 GOOS=linux   GOARCH=amd64 go build ./... && GOOS=linux   go vet ./...
+GOOS=linux   GOARCH=arm64 go vet ./...
 GOOS=windows GOARCH=amd64 go build ./... && GOOS=windows go vet ./...
 ```
 
-The cross-GOOS pair is mandatory — build-tagged files break silently otherwise, and dev is
-Windows while production is Linux.
+All green. Smoke-tested end to end: metrics, `/-/ready`, landing page, filesystem context and
+`build_info` all served correctly, with `disk_usage_bytes` correctly **absent** on Windows.
 
-> **`-race` cannot run on this dev machine.** It requires cgo and there is no `gcc` in PATH, so
-> `CGO_ENABLED=1 go test -race ./...` fails to build. Every race-sensitive test the plan calls for
-> (`TestStore_ConcurrentApplyAndSnapshotIsRaceFree`, `TestEngine_PerTargetStatsAreNotCrossContaminated`,
-> `TestCollector_ConcurrentGatherDuringScan`) must therefore be gated in **Linux CI**, which is the
-> only place the detector will actually run. Do not treat a local green run as race-clean. Fixing
-> this locally means installing a MinGW-w64 toolchain.
+> **`-race` cannot run on this dev machine.** It needs cgo and there is no `gcc` in PATH. Every
+> race-sensitive test (`TestStore_ConcurrentApplyAndSnapshot`,
+> `TestEngine_PerTargetTotalsAreNotCrossContaminated`, `TestCollector_ConcurrentGatherDuringScan`,
+> `TestFake_IsSafeForConcurrentUse`) only exercises the detector in Linux CI. A green local run is
+> **not** evidence of race-freedom. Fixing this locally means installing MinGW-w64.
 
-## Current state
+## Things a future session must not undo
 
-**P-1, P0, P1, P2, P3 and P4 complete and verified. Paused here at the user's request.**
+1. **The latch ordering in `scan/engine.go`.** Capacity is reserved *before* children are enqueued
+   and released *after* a directory completes. Reversing it finalises a target as **complete**
+   holding a fraction of its size, which the retention rules then publish as truth. Mutation-tested:
+   reversing the two lines fails `TestEngine_LatchDoesNotFireEarly` on run 0 with `size = 0, want 40`.
+2. **`published` vs `good` in `state/store.go`.** Two measurements per target. Collapsing them makes
+   `--scan.publish-partial` silently corrupt every growth metric and capacity forecast.
+3. **Absent, never zero.** No measurement is emitted before the first completed scan, and no
+   capability-dependent metric is approximated. Both were real defects.
+4. **No per-file error logging.** Enforced by `TestScan_NeverLogsPerFileErrors`.
 
-The full pipeline `fsstat` → `scan` → `state` → `collector` → `server` now exists and is tested
-end to end within each package, but **nothing is wired together yet**.
-`cmd/directory-size-exporter/main.go` still runs the old `internal/exporter` collector, which
-carries only the P-1 hotfix. So the shipped binary is safer than it was, but none of the new
-capability is live.
+## Known gaps, deliberately not implemented
 
-**Next: P5 — `internal/config` + `internal/targets`.**
-- kingpin flags + `DIR_EXPORTER_*` env + strict YAML, precedence `flag > env > yaml > default`
-  with per-field provenance tracking
-- `TestFlags_EveryConfigFieldHasAFlag` (reflection) to stop the flag surface drifting
-- Tri-state `true|false|auto` capability gating; `true` on an unsupported platform exits 2
-- Startup audit lines logging every setting with its source
-- Target resolver: glob expansion, `EvalSymlinks`, dedup, overlap detection, re-resolution
-  diffing, vanish grace period, `--targets.max`
+- **Per-target scan tuning.** The plan mentioned per-target interval/timeout/labels in YAML. The
+  YAML file configures targets and global settings only; per-target scheduling would need changes
+  in both the engine (one cycle currently scans all targets) and the collector. **This is the one
+  planned item not delivered.**
+- **kingpin bool flags.** kingpin treats booleans as valueless, so `--flag=true` would fail with
+  "unexpected true". `Registry.NormalizeArgs` rewrites `=true`/`=false` into `--flag`/`--no-flag`
+  so both spellings work; do not remove it without also fixing the docs, which use `=true`.
+- **Windows is dev parity only.** No allocated-block or inode support by design.
+- **`FSInfo.Device` is `major:minor`,** not `/dev/sda1`, to avoid parsing `/proc/self/mountinfo`.
 
-Then P6 wires `main.go` and deletes `internal/exporter`, and P7 adds `internal/schedprio`.
+## Possible follow-ups
+
+- Per-target scan tuning (above).
+- Raw `getdents64` parsing to remove the remaining per-entry allocation in the standard library.
+- Ship the alert rules from `README.md` as a packaged rules file.
+- Release automation: version ldflags are wired to `prometheus/common/version` but nothing sets them.

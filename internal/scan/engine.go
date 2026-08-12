@@ -64,6 +64,11 @@ type Config struct {
 	// indistinguishable from a hang.
 	HeartbeatAfter time.Duration
 	HeartbeatEvery time.Duration
+
+	// WorkerInit runs once on each worker goroutine before it takes any work, on the goroutine
+	// itself. It exists so scheduling priority can be applied per thread: the setting is a
+	// property of the OS thread, so it cannot be applied from the goroutine that starts the pool.
+	WorkerInit func() error
 }
 
 func (c Config) withDefaults() Config {
@@ -341,6 +346,15 @@ func (e *Engine) buildResult(target *targetScan, outcome state.Outcome) state.Re
 
 // worker is one member of the shared pool.
 func (e *Engine) worker(ctx context.Context, work *pool) {
+	if e.cfg.WorkerInit != nil {
+		if err := e.cfg.WorkerInit(); err != nil {
+			// Logged once per worker per cycle and otherwise ignored: failing to lower priority
+			// makes the scan noisier than intended, but refusing to scan at all would be a worse
+			// outcome than scanning at normal priority.
+			e.logger.Warn("Could not apply scan worker scheduling priority", "err", err)
+		}
+	}
+
 	// Reused across every entry this worker ever handles, so the hot path allocates nothing.
 	var st fsstat.FileStat
 	var totals dirTotals
