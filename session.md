@@ -69,12 +69,24 @@ not `/dev/sda1`. Resolving a device name needs `/proc/self/mountinfo`, which rac
 mounts and shows the *host's* mount tree from inside a container. `Mountpoint` is the intended join
 key between a target and its filesystem, so the device name is not needed for any planned query.
 
-### P2 — `internal/state` (test-first)
-- [ ] `TestStore_RetentionTable` written **before** `store.go`
-- [ ] `store.go`: lastGood replaced only on `complete`; delta spans only completed scans
-- [ ] Nothing emitted before the first `complete`; monotonic added/removed counters
-- [ ] `--scan.publish-partial` freezes delta+counters even when publishing
-- [ ] Race test for concurrent Apply/Snapshot
+### P2 — `internal/state` (test-first) — **DONE**
+- [x] `store_test.go` written **before** `store.go` and confirmed red (undefined symbols)
+- [x] `TestStore_RetentionTable`: one subtest per row of the FR3 table
+- [x] `store.go`: pure logic, no prometheus, no filesystem, injected clock
+- [x] Nothing published before the first `complete`; `Has*` flags carry absent-vs-zero
+- [x] Delta spans only completed scans, with `DeltaIntervalSeconds` alongside it
+- [x] `PublishPartial` publishes the size but freezes delta **and** the byte counters
+- [x] `StaleAfter` withdraws the measurement while keeping status visible
+- [x] Per-target in-flight tracking (`MarkScanStarted`) serving the previous good value
+- [x] `SetTargets` retains survivors and garbage-collects removed targets
+- [x] Snapshots deep-copy their maps, so a scrape cannot mutate store state
+- [x] `TestStore_ConcurrentApplyAndSnapshot` (only meaningful under `-race`, i.e. Linux CI)
+
+**Design note — `published` vs `good`.** Two separate measurements are kept per target. `good` moves
+only on a completed scan and is the delta baseline; `published` is what the collector renders. They
+are identical except under `--scan.publish-partial`, where the operator sees a rough partial number
+while growth data stays anchored to the last clean scan. Collapsing them into one field would make
+`publish-partial` silently corrupt every capacity forecast.
 
 ### P3 — `internal/scan`
 - [ ] `engine.go`: global pool, per-worker LIFO stacks, non-blocking bounded overflow deque
@@ -128,5 +140,5 @@ Windows while production is Linux.
 
 ## Current state
 
-P-1, P0 and P1 complete and verified. Next: P2 — `internal/state`, written test-first from the
-FR3 retention table.
+P-1, P0, P1 and P2 complete and verified. Next: P3 — `internal/scan`, the bounded-parallel engine
+and walker built on `fsstat.FS` and feeding `state.Result`.
