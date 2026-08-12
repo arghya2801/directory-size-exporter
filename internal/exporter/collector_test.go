@@ -179,6 +179,7 @@ func TestNormalizeTargets(t *testing.T) {
 		t.Fatal("missing targets were accepted")
 	}
 }
+
 // cachedStats returns the most recent scan attempt for target, whatever its outcome.
 func cachedStats(t *testing.T, collector *DirectoryCollector, target string) TargetStats {
 	t.Helper()

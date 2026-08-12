@@ -27,6 +27,15 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 

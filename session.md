@@ -88,13 +88,29 @@ are identical except under `--scan.publish-partial`, where the operator sees a r
 while growth data stays anchored to the last clean scan. Collapsing them into one field would make
 `publish-partial` silently corrupt every capacity forecast.
 
-### P3 — `internal/scan`
-- [ ] `engine.go`: global pool, per-worker LIFO stacks, non-blocking bounded overflow deque
-- [ ] **Increment-before-enqueue latch invariant** + 500× early-fire test
-- [ ] Batched rate limiter (`WaitN` once per batch), per-batch cancellation check
-- [ ] `--scan.hard-timeout` worker abandonment + `abandoned_scan_workers`
-- [ ] `walk.go`: one-filesystem, hardlink dedup (`Nlink>1` only, bounded), vanished-file handling
-- [ ] `errclass.go`, `progress.go` heartbeats, `summary.go` — **never per-file error logs**
+### P3 — `internal/scan` — **DONE**
+- [x] `engine.go`: one global worker pool across all targets, per-worker LIFO stacks, bounded
+      non-blocking overflow deque, `pool.close()` termination
+- [x] **Increment-before-enqueue latch invariant**, verified by mutation testing (see note below)
+- [x] Batched rate limiter (`WaitN` once per batch); burst auto-raised to `BatchSize+1`
+- [x] Per-batch cancellation via a plain `atomic.Bool`, not `ctx.Err()` (D6)
+- [x] Hard-timeout abandonment + bounded worker drain + `AbandonedWorkers` in `Stats()`
+- [x] `walk.go`: open-drain-close per directory so open fds == concurrency regardless of depth;
+      one-filesystem, hardlink dedup (`Nlink>1` only, bounded, per-target), vanished-file handling
+- [x] `errclass.go`: portable `errors.Is` first, then errno; no build tags needed
+- [x] `progress.go` heartbeats; `summary.go` one line per target per scan
+- [x] 25 tests, all green. `TestScan_NeverLogsPerFileErrors` asserts **exactly one** log record
+      for 2000 permission failures.
+
+**Verification note — the latch guard is mutation-tested.** `TestEngine_LatchDoesNotFireEarly` was
+confirmed to catch the bug: reversing `completeDir()` and `addPending()` in `engine.go` made it fail
+on run 0 with `size = 0, want 40`. That is the exact catastrophic shape — a target finalised as
+**complete** holding none of its data, which the retention rules would then publish as truth. If
+that ordering is ever touched, re-run this mutation.
+
+**Also in this phase:** added `.gitattributes` (`*.go text eol=lf`). Without it every Go file in a
+Windows working tree is reported by `gofmt -l`, which buried the two files that genuinely needed
+formatting. CI now gates on `gofmt -l`.
 
 ### P4 — `internal/collector` + `internal/server`
 - [ ] Descs, per-target collector, filesystem collector deduped by device ID
@@ -140,5 +156,15 @@ Windows while production is Linux.
 
 ## Current state
 
-P-1, P0, P1 and P2 complete and verified. Next: P3 — `internal/scan`, the bounded-parallel engine
-and walker built on `fsstat.FS` and feeding `state.Result`.
+**P-1, P0, P1, P2 and P3 complete and verified. Paused here at the user's request.**
+
+`internal/scan` is finished but **not yet wired into anything** — `cmd/directory-size-exporter`
+still runs the old `internal/exporter` collector, which carries only the P-1 hotfix. The new
+`fsstat` → `scan` → `state` pipeline has no collector in front of it yet.
+
+**Next: P4 — `internal/collector` + `internal/server`.** That is the phase that makes the new
+pipeline observable: metric descriptors, the per-target collector reading `state.Snapshot`, the
+filesystem collector deduped by mountpoint, self collectors (`go_*`, `process_*`, `build_info`,
+`platform_capability`), and the server with a landing page, health/ready endpoints and TLS+auth via
+`--web.config.file`. Note `http_acceptance_test.go:49-51` asserts `/` returns 404 and must be
+updated when the landing page lands — that breakage is expected, not a regression.
