@@ -124,7 +124,14 @@ type Engine struct {
 
 	scansSkipped  atomic.Uint64
 	rateWaitNanos atomic.Int64
-	liveWorkers   atomic.Int64
+	// liveWorkers counts worker goroutines that have not returned, including ones leaked by
+	// earlier cycles. During a normal scan it equals the concurrency limit, so it is a measure of
+	// activity rather than of trouble.
+	liveWorkers atomic.Int64
+	// abandonedWorkers is the leaked count, sampled after each cycle has closed its pool and given
+	// workers a chance to exit. Reporting liveWorkers here instead would flag every running scan
+	// as stuck.
+	abandonedWorkers atomic.Int64
 }
 
 // NewEngine returns an engine reading through fs.
@@ -154,7 +161,7 @@ func (e *Engine) Stats() Stats {
 	return Stats{
 		ScansSkipped:     e.scansSkipped.Load(),
 		RateLimitWait:    time.Duration(e.rateWaitNanos.Load()).Seconds(),
-		AbandonedWorkers: e.liveWorkers.Load(),
+		AbandonedWorkers: e.abandonedWorkers.Load(),
 	}
 }
 
@@ -233,6 +240,11 @@ func (e *Engine) drainWorkers(workers *sync.WaitGroup) {
 		e.logger.Warn("Scan workers did not exit; presumed stuck in an uninterruptible filesystem call",
 			"live_workers", e.liveWorkers.Load(), "drain_timeout", e.cfg.WorkerDrainTimeout)
 	}
+
+	// Sampled after the pool has closed and workers have had their chance to exit, so anything
+	// still running is genuinely leaked. This is deliberately read in both branches: a clean drain
+	// still leaves behind any workers leaked by earlier cycles, and those remain leaked.
+	e.abandonedWorkers.Store(e.liveWorkers.Load())
 }
 
 // prepareRoot validates the target root and captures its device for the one-filesystem check.
@@ -248,7 +260,7 @@ func (e *Engine) prepareRoot(target *targetScan) (state.Outcome, bool) {
 	if st.Mode&fs.ModeSymlink != 0 {
 		// Target resolution is expected to have followed this already. Reaching here means the
 		// configured path is an unresolved symlink, which the previous implementation measured as
-		// zero bytes while reporting success — a failure that looked healthy on every dashboard.
+		// zero bytes while reporting success â€” a failure that looked healthy on every dashboard.
 		target.recordError(errUnresolvedSymlink)
 		return state.OutcomeRootError, false
 	}
@@ -283,9 +295,16 @@ func (e *Engine) supervise(ctx context.Context, target *targetScan, sink Sink) {
 		// Workers check this flag once per batch, so the walk stops within roughly one batch of
 		// the deadline rather than after the next full directory.
 		target.cancelled.Store(true)
+
+		// This wait must have a deadline of its own rather than reusing the hard timer. On process
+		// shutdown workers return as soon as they notice the root context, which can leave this
+		// target's queue undrained so its latch never fires. With --scan.timeout unset the hard
+		// timer is disabled, so waiting on it alone would block here forever.
+		drain := newOptionalTimer(longest(e.cfg.HardTimeout, e.cfg.WorkerDrainTimeout))
+		defer drain.Stop()
 		select {
 		case <-target.done:
-		case <-hard.C():
+		case <-drain.C():
 			e.abandon(target)
 		}
 	case <-hard.C():
@@ -403,7 +422,7 @@ func (e *Engine) waitForTokens(ctx context.Context, n int) error {
 // Each worker keeps a private LIFO stack and only donates to the shared queue once it has plenty
 // of work. LIFO means depth-first, which keeps the working set small and the directory-entry cache
 // hot. A worker that cannot donate keeps the work instead of blocking, so no worker ever waits to
-// enqueue — which is precisely the deadlock a bounded channel with recursive sends would hit.
+// enqueue â€” which is precisely the deadlock a bounded channel with recursive sends would hit.
 type pool struct {
 	mu        sync.Mutex
 	cond      *sync.Cond
@@ -509,4 +528,13 @@ func (t optionalTimer) Stop() {
 	if t.timer != nil {
 		t.timer.Stop()
 	}
+}
+
+// longest returns the larger duration, treating a non-positive value as "unset" so a disabled
+// timeout never wins and produces a disabled timer.
+func longest(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }

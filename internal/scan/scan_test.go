@@ -479,6 +479,94 @@ func TestEngine_SingleFlightRejectsOverlappingScans(t *testing.T) {
 	close(release)
 }
 
+// TestEngine_AbandonedWorkersIsZeroAfterHealthyScans separates "workers are running" from
+// "workers are stuck".
+//
+// Reporting the live worker count as abandoned makes the gauge equal the concurrency limit during
+// every normal scan. The shipped alert fires at or above the concurrency limit, so on a tree whose
+// cycle legitimately exceeds the alert's `for` window — precisely the workload this exporter is
+// built for — it would fire continuously, get silenced, and take the real signal with it.
+func TestEngine_AbandonedWorkersIsZeroAfterHealthyScans(t *testing.T) {
+	fake := fsstat.NewFake(0)
+	for i := 0; i < 200; i++ {
+		fake.AddFile(fmt.Sprintf("/logs/dir%03d/file.log", i), 10)
+	}
+	fake.BeforeRead(func(string) error {
+		time.Sleep(500 * time.Microsecond)
+		return nil
+	})
+
+	const concurrency = 4
+	engine := NewEngine(fake, testConfig(Config{Concurrency: concurrency, BatchSize: 1}), nil)
+
+	done := make(chan struct{})
+	go func() {
+		engine.ScanAll(context.Background(), []string{"/logs"}, newSink())
+		close(done)
+	}()
+
+	// The gauge has to be sampled WHILE the scan runs, because that is when Prometheus scrapes it.
+	// A sample taken after ScanAll returns proves nothing: every worker has exited by then, so a
+	// gauge wired to the live worker count would read zero and look correct.
+	for fake.ReadCalls() < 10 {
+		time.Sleep(time.Millisecond)
+	}
+	midScan := engine.Stats().AbandonedWorkers
+	<-done
+
+	if midScan != 0 {
+		t.Fatalf("abandoned workers = %d during a healthy scan, want 0; the alert at >= concurrency (%d) would fire on every long cycle",
+			midScan, concurrency)
+	}
+	if got := engine.Stats().AbandonedWorkers; got != 0 {
+		t.Errorf("abandoned workers = %d after a clean scan, want 0", got)
+	}
+}
+
+// TestEngine_ShutdownDoesNotBlockWithoutAHardTimeout covers the default configuration, where
+// --scan.timeout is unset and therefore no hard timeout is derived.
+//
+// Workers return as soon as they notice the root context, which can leave a target's queue
+// undrained so its completion latch never fires. If the cancelled path waited only on the hard
+// timer, that wait would be on a disabled timer and the cycle would never finish.
+func TestEngine_ShutdownDoesNotBlockWithoutAHardTimeout(t *testing.T) {
+	fake := fsstat.NewFake(0)
+	for i := 0; i < 200; i++ {
+		fake.AddFile(fmt.Sprintf("/logs/dir%03d/file.log", i), 10)
+	}
+	fake.BeforeRead(func(string) error {
+		time.Sleep(200 * time.Microsecond)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	engine := NewEngine(fake, Config{
+		Concurrency: 2, BatchSize: 1,
+		// Deliberately the defaults: no scan timeout, so no hard timeout is derived either.
+		ScanTimeout: 0, HardTimeout: 0,
+		WorkerDrainTimeout: 250 * time.Millisecond,
+	}, nil)
+
+	sink := newSink()
+	done := make(chan bool, 1)
+	go func() { done <- engine.ScanAll(ctx, []string{"/logs"}, sink) }()
+
+	// Cancel once the walk is genuinely under way.
+	for fake.ReadCalls() < 5 {
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ScanAll never returned after cancellation; the cycle deadlocked waiting on a disabled timer")
+	}
+	if got := sink.get(t, "/logs"); got.Outcome != state.OutcomeCancelled {
+		t.Errorf("outcome = %s, want cancelled", got.Outcome)
+	}
+}
+
 // TestEngine_HardTimeoutAbandonsStuckWorker models a hung NFS mount. Filesystem syscalls in that
 // state are uninterruptible, so no context plumbing can rescue the worker; the engine must give up
 // on the target and keep running, or one bad mount wedges every future cycle.
@@ -511,8 +599,10 @@ func TestEngine_HardTimeoutAbandonsStuckWorker(t *testing.T) {
 	if got := sink.get(t, "/logs"); got.Outcome != state.OutcomeTimeout {
 		t.Errorf("outcome = %s, want timeout", got.Outcome)
 	}
-	if got := engine.Stats().AbandonedWorkers; got < 1 {
-		t.Errorf("abandoned workers = %d, want at least 1 so the leak is visible", got)
+	// Measured only once the pool has closed and workers have had their chance to exit, so this
+	// counts a genuine leak rather than a scan that happened to be running.
+	if got := engine.Stats().AbandonedWorkers; got != 1 {
+		t.Errorf("abandoned workers = %d, want exactly 1 (the single stuck worker)", got)
 	}
 }
 

@@ -251,6 +251,51 @@ func TestYAML_ConfigFileCannotBeSetFromYAML(t *testing.T) {
 	}
 }
 
+// TestEnv_ConfigFileIsHonoured covers a setting that has to be resolved before every other one,
+// because it names the file the others come from. Reading it in the normal environment pass would
+// happen after the decision to load a file, so the variable would be accepted and then silently
+// ignored — leaving an exporter that starts up looking healthy with none of its config applied.
+func TestEnv_ConfigFileIsHonoured(t *testing.T) {
+	configPath := writeConfig(t, "targets:\n  - /data/logs\nscan:\n  batch-size: 77\n")
+	t.Setenv(EnvName("config.file"), configPath)
+
+	registry, err := parse(t, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Config().ScanBatchSize; got != 77 {
+		t.Fatalf("scan.batch-size = %d, want 77; the config file named by the environment was not loaded", got)
+	}
+	if got := registry.Config().TargetPatterns; len(got) != 1 || got[0] != "/data/logs" {
+		t.Errorf("targets = %v, want the values from the config file", got)
+	}
+	if source := sourceOf(t, registry, "config.file"); source != SourceEnv {
+		t.Errorf("config.file source = %s, want %s", source, SourceEnv)
+	}
+}
+
+func TestEnv_ConfigFileFlagStillWins(t *testing.T) {
+	fromFlag := writeConfig(t, "scan:\n  batch-size: 11\n")
+	fromEnv := writeConfig(t, "scan:\n  batch-size: 22\n")
+	t.Setenv(EnvName("config.file"), fromEnv)
+
+	registry, err := parse(t, []string{"--path.target=/x", "--config.file=" + fromFlag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := registry.Config().ScanBatchSize; got != 11 {
+		t.Errorf("scan.batch-size = %d, want 11 from the flag-named file", got)
+	}
+}
+
+func TestEnv_MissingConfigFileFromEnvIsAnError(t *testing.T) {
+	// Silently continuing would start an exporter with none of its intended configuration.
+	t.Setenv(EnvName("config.file"), filepath.Join(t.TempDir(), "absent.yml"))
+	if _, err := parse(t, []string{"--path.target=/x"}); err == nil {
+		t.Fatal("a missing config file named by the environment was ignored")
+	}
+}
+
 func TestEnv_InvalidValueIsRejected(t *testing.T) {
 	t.Setenv(EnvName("scan.concurrency"), "many")
 	_, err := parse(t, []string{"--path.target=/data/logs"})

@@ -56,6 +56,24 @@ All green. Smoke-tested end to end: metrics, `/-/ready`, landing page, filesyste
 > `TestFake_IsSafeForConcurrentUse`) only exercises the detector in Linux CI. A green local run is
 > **not** evidence of race-freedom. Fixing this locally means installing MinGW-w64.
 
+## Post-review fixes
+
+A review of the branch against `main` found three defects, all fixed and all mutation-tested
+(the fix was reverted and the new test confirmed to fail):
+
+1. **`abandoned_scan_workers` reported the live worker count**, so it equalled `--scan.concurrency`
+   during every normal scan. The shipped alert fires at `>= concurrency`, so on any host whose scan
+   cycle outlasts the alert window — the intended workload — it would have fired continuously and
+   been silenced, taking the real signal with it. Now sampled only after the pool closes.
+   Mutation: `abandoned workers = 4 during a healthy scan`.
+2. **`supervise` blocked forever at shutdown under default settings.** `--scan.timeout` defaults to
+   `0`, so no hard timeout is derived and its timer channel is nil. Workers exit on root-context
+   cancellation leaving queues undrained, so the latch never fired and the wait never ended. The
+   cancelled path now has its own deadline. Mutation: `ScanAll never returned after cancellation`.
+3. **`DIR_EXPORTER_CONFIG_FILE` was silently ignored.** `Resolve` loaded YAML before the environment
+   pass, so the variable naming the file was read too late. It is now resolved first.
+   Mutation: `scan.batch-size = 1024, want 77`.
+
 ## Things a future session must not undo
 
 1. **The latch ordering in `scan/engine.go`.** Capacity is reserved *before* children are enqueued

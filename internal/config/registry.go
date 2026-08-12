@@ -14,6 +14,10 @@ import (
 	"github.com/local/directory-size-exporter/internal/fsstat"
 )
 
+// configFileFlag names the setting that points at the YAML file, which Resolve has to handle
+// before every other setting.
+const configFileFlag = "config.file"
+
 type kind int
 
 const (
@@ -149,7 +153,7 @@ func NewRegistry() *Registry {
 	add(&field{name: "log.heartbeat-interval", kind: kindDuration, ptr: &cfg.LogHeartbeatInterval, def: "30s",
 		help: "Interval between scan progress lines."})
 
-	add(&field{name: "config.file", kind: kindString, ptr: &cfg.ConfigFile, def: "", noYAML: true,
+	add(&field{name: configFileFlag, kind: kindString, ptr: &cfg.ConfigFile, def: "", noYAML: true,
 		help: "YAML configuration file. Flags and environment variables override its values."})
 
 	return r
@@ -240,6 +244,22 @@ func (r *Registry) Resolve(configPath string) error {
 			f.source = SourceFlag
 		}
 	}
+
+	// config.file has to be settled before anything else, because it names the file the other
+	// settings come from. Leaving it to the normal environment pass would read it only after the
+	// decision to load a file had already been made, so DIR_EXPORTER_CONFIG_FILE would be accepted
+	// and then silently ignored — the worst outcome, since the exporter would start up looking
+	// healthy with none of its intended configuration applied.
+	if configPath == "" {
+		if raw, ok := os.LookupEnv(EnvName(configFileFlag)); ok && strings.TrimSpace(raw) != "" {
+			configPath = strings.TrimSpace(raw)
+			if f := r.byName[configFileFlag]; f != nil {
+				*f.ptr.(*string) = configPath
+				f.source = SourceEnv
+			}
+		}
+	}
+
 	if configPath != "" {
 		if err := r.applyYAML(configPath); err != nil {
 			return err
