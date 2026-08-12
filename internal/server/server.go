@@ -19,13 +19,14 @@ type Options struct {
 	// reload endpoint lets anyone force repeated reloads, and the exporter is commonly deployed
 	// without authentication on a trusted network.
 	EnableLifecycle bool
-	// ReadyRequiresScan holds /-/ready at 503 until every target has completed a scan. That is
-	// usually what you want: a freshly started exporter has no measurements, and routing traffic
-	// or satisfying a deployment gate on it would treat "not scanned yet" as healthy.
+	// ReadyRequiresScan holds /-/ready at 503 until Ready reports true. That is usually what you
+	// want: a freshly started exporter has no measurements, and satisfying a deployment gate on it
+	// would treat "not scanned yet" as healthy.
 	ReadyRequiresScan bool
 	// Reload is invoked by the lifecycle endpoint. Nil disables the endpoint regardless.
 	Reload func() error
-	// Ready reports whether every target has at least one completed scan.
+	// Ready reports whether the exporter has enough data to be worth scraping. The caller decides
+	// what that means; see the note on readiness in README.
 	Ready func() bool
 }
 
@@ -81,7 +82,7 @@ func (s *Server) handleHealthy(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	if s.opts.ReadyRequiresScan && s.opts.Ready != nil && !s.opts.Ready() {
 		// Not an error: the first walk of a multi-terabyte tree legitimately takes minutes.
-		writePlain(w, http.StatusServiceUnavailable, "waiting for the first scan of every target to complete")
+		writePlain(w, http.StatusServiceUnavailable, "waiting for the first scan cycle to complete")
 		return
 	}
 	writePlain(w, http.StatusOK, "READY")

@@ -74,6 +74,20 @@ A review of the branch against `main` found three defects, all fixed and all mut
    pass, so the variable naming the file was read too late. It is now resolved first.
    Mutation: `scan.batch-size = 1024, want 77`.
 
+The review's lower-severity items were also addressed: filesystem timeout counts are pruned when a
+target is retired; derived settings are audited as `origin=derived` rather than `default`;
+`--scan.stale-after` must exceed `--scan.interval` or the series would flap every cycle.
+
+**Readiness was redefined while fixing it.** It now tracks completion of the first scan *cycle*,
+not success of every target. Requiring every target would let one permanently unreadable directory
+hold the exporter at 503 forever while nineteen others reported fine — under an orchestrator, the
+process would never enter service. It stays one-way, so a glob picking up a new directory does not
+drop the exporter out of service; an unscanned target is already visible by having no size series.
+
+**The audit attribute is keyed `origin`, not `source`.** promslog reserves `source` for the code
+location and silently renames colliding attributes, so the key differed between the unit test's
+plain handler and the real binary. Caught by a smoke test, not by the unit test.
+
 ## Things a future session must not undo
 
 1. **The latch ordering in `scan/engine.go`.** Capacity is reserved *before* children are enqueued

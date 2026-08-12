@@ -26,6 +26,9 @@ const (
 	SourceYAML    Source = "yaml"
 	SourceEnv     Source = "env"
 	SourceFlag    Source = "flag"
+	// SourceDerived marks a value computed from another setting during validation. Reporting these
+	// as defaults would send an operator hunting through --help for a default that does not exist.
+	SourceDerived Source = "derived"
 )
 
 // EnvPrefix prefixes every environment variable this exporter reads.

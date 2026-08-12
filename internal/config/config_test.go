@@ -414,13 +414,48 @@ func TestValidate_HardTimeoutMustExceedScanTimeout(t *testing.T) {
 		t.Fatalf("error = %v, want a refusal", err)
 	}
 
-	resolved, err := validate(t, []string{"--path.target=/x", "--scan.timeout=10m"}, allCaps)
+	registry, err := parse(t, []string{"--path.target=/x", "--scan.timeout=10m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := registry.Validate(allCaps, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Derived rather than left at zero, so a stuck target is always eventually released.
 	if resolved.ScanHardTimeout != 20*time.Minute {
 		t.Errorf("derived hard timeout = %s, want 20m", resolved.ScanHardTimeout)
+	}
+	// Reported as derived, not as a default: an operator tracing why a target was abandoned would
+	// otherwise go looking through --help for a 20m default that does not exist.
+	if source := sourceOf(t, registry, "scan.hard-timeout"); source != SourceDerived {
+		t.Errorf("scan.hard-timeout source = %s, want %s", source, SourceDerived)
+	}
+}
+
+// TestValidate_StaleAfterMustExceedScanInterval catches a setting that makes the size series flap
+// in and out on every cycle, which reads as an exporter fault rather than as the staleness signal
+// it is meant to be.
+func TestValidate_StaleAfterMustExceedScanInterval(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{"below the interval", []string{"--scan.interval=5m", "--scan.stale-after=2m"}, true},
+		{"equal to the interval", []string{"--scan.interval=5m", "--scan.stale-after=5m"}, true},
+		{"above the interval", []string{"--scan.interval=5m", "--scan.stale-after=20m"}, false},
+		{"disabled", []string{"--scan.interval=5m", "--scan.stale-after=0"}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := validate(t, append([]string{"--path.target=/x"}, testCase.args...), allCaps)
+			if testCase.wantErr && err == nil {
+				t.Fatal("a stale-after that flaps the series was accepted")
+			}
+			if !testCase.wantErr && err != nil {
+				t.Fatalf("valid configuration rejected: %v", err)
+			}
+		})
 	}
 }
 
@@ -444,17 +479,22 @@ func TestAudit_LogsEverySettingWithItsSource(t *testing.T) {
 		if record.Message != "Setting resolved" {
 			continue
 		}
-		var name, source string
+		var name, origin string
 		record.Attrs(func(attr slog.Attr) bool {
 			switch attr.Key {
 			case "name":
 				name = attr.Value.String()
-			case "source":
-				source = attr.Value.String()
+			case "origin":
+				origin = attr.Value.String()
 			}
 			return true
 		})
-		sources[name] = source
+		if origin == "" {
+			// promslog renames attributes that collide with its own reserved keys, so an audit key
+			// that survives a plain handler can still be mangled in the real binary.
+			t.Errorf("setting %s logged no origin; check the attribute key does not collide", name)
+		}
+		sources[name] = origin
 	}
 
 	// Every setting must be present, so the audit answers "why is it behaving this way" without

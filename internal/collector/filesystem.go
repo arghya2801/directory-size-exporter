@@ -64,6 +64,13 @@ func (c *FilesystemCache) Refresh(ctx context.Context, targets []string) {
 
 	c.mu.Lock()
 	c.byTarget = next
+	// Timeout counts are keyed by target, so a host with dated glob targets would otherwise
+	// accumulate an entry for every directory that ever timed out and never release one.
+	for target := range c.timeouts {
+		if _, still := next[target]; !still {
+			delete(c.timeouts, target)
+		}
+	}
 	c.mu.Unlock()
 }
 

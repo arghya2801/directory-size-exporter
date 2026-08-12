@@ -312,6 +312,39 @@ func (b *blockingFS) StatFS(string) (fsstat.FSInfo, error) {
 	return fsstat.FSInfo{}, nil
 }
 
+// TestFilesystemCache_ForgetsTargetsThatAreGone matters on a host with dated glob targets, where
+// directories are created and retired continuously: a timeout count kept for every target that
+// ever existed would grow for the life of the process.
+func TestFilesystemCache_ForgetsTargetsThatAreGone(t *testing.T) {
+	fake := fsstat.NewFake(fsstat.CapFSBytes)
+	for _, path := range []string{"/logs/day-01", "/logs/day-02"} {
+		fake.AddDir(path)
+	}
+	blocked := make(chan struct{})
+	defer close(blocked)
+	cache := NewFilesystemCache(&blockingFS{FakeFS: fake, block: blocked}, 10*time.Millisecond, nil)
+
+	cache.Refresh(context.Background(), []string{"/logs/day-01", "/logs/day-02"})
+	if got := countTimeouts(cache); got != 2 {
+		t.Fatalf("tracked timeouts = %d, want 2", got)
+	}
+
+	// day-01 is retired; only day-02 remains configured.
+	cache.Refresh(context.Background(), []string{"/logs/day-02"})
+	if got := countTimeouts(cache); got != 1 {
+		t.Errorf("tracked timeouts = %d after a target was retired, want 1", got)
+	}
+	if _, still := cache.timeouts["/logs/day-01"]; still {
+		t.Error("a retired target's timeout count was retained")
+	}
+}
+
+func countTimeouts(cache *FilesystemCache) int {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return len(cache.timeouts)
+}
+
 func TestRecorder_FeedsBothRetentionAndHistogram(t *testing.T) {
 	store, collector, _ := newHarness(t, allOptions(), fsstat.CapAllocBytes)
 	recorder := collector.Recorder()

@@ -165,6 +165,14 @@ func (r *Registry) Config() *Config { return r.cfg }
 // Fields returns every registered field in declaration order.
 func (r *Registry) Fields() []*field { return r.fields }
 
+// markDerived records that a setting was computed from another during validation, so the startup
+// audit does not present it as a default the operator could have looked up.
+func (r *Registry) markDerived(name string) {
+	if f := r.byName[name]; f != nil {
+		f.source = SourceDerived
+	}
+}
+
 // RegisterFlags declares every field on the kingpin application.
 func (r *Registry) RegisterFlags(app *kingpin.Application) {
 	for _, f := range r.fields {

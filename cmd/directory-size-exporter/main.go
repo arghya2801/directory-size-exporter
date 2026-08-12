@@ -73,11 +73,11 @@ func run() error {
 	logger.Info("Starting directory-size-exporter", "version", version.Info(), "build_context", version.BuildContext())
 	registry.LogAudit(logger, resolved)
 
-	app_, err := newApp(resolved, logger)
+	exporter, err := newApp(resolved, logger)
 	if err != nil {
 		return err
 	}
-	return app_.serve(webFlags, logger)
+	return exporter.serve(webFlags, logger)
 }
 
 // application holds the wired-together components.
@@ -91,9 +91,19 @@ type application struct {
 	metrics  *collector.Collector
 	registry *prometheus.Registry
 
-	// scannedOnce reports whether every target has completed at least one scan, which is what
-	// readiness is waiting for.
-	scannedOnce atomic.Bool
+	// firstCycleComplete reports whether a full scan cycle has finished, which is what readiness
+	// waits for.
+	//
+	// Deliberately a property of the cycle rather than of every target's success. Requiring every
+	// target to have published would leave a single permanently-unreadable directory holding the
+	// whole exporter at 503 forever, even while nineteen other targets report perfectly — and
+	// under an orchestrator that means the process never enters service at all.
+	//
+	// It is also deliberately one-way. Re-evaluating per request would drop the exporter out of
+	// service every time a glob picked up a new directory, which is a routine event on a host with
+	// dated log paths. A newly added target that has not been scanned yet is already visible: its
+	// size series is absent and its scan_age is unset.
+	firstCycleComplete atomic.Bool
 }
 
 func newApp(cfg *config.Resolved, logger *slog.Logger) (*application, error) {
@@ -199,7 +209,7 @@ func (a *application) serve(webFlags *web.FlagConfig, logger *slog.Logger) error
 		MetricsPath:       a.cfg.WebTelemetryPath,
 		EnableLifecycle:   a.cfg.WebEnableLifecycle,
 		ReadyRequiresScan: a.cfg.WebReadyRequiresScan,
-		Ready:             a.scannedOnce.Load,
+		Ready:             a.firstCycleComplete.Load,
 		Reload:            a.reload,
 	})
 
@@ -266,21 +276,9 @@ func (a *application) runCycle(ctx context.Context) {
 	if !a.engine.ScanAll(ctx, paths, a.metrics.Recorder()) {
 		return
 	}
-	if ctx.Err() == nil && a.everyTargetScanned(paths) {
-		a.scannedOnce.Store(true)
+	if ctx.Err() == nil {
+		a.firstCycleComplete.Store(true)
 	}
-}
-
-// everyTargetScanned reports whether all targets now hold a published measurement, which is the
-// condition readiness waits on.
-func (a *application) everyTargetScanned(paths []string) bool {
-	for _, path := range paths {
-		snapshot, ok := a.store.SnapshotFor(path)
-		if !ok || !snapshot.HasGood {
-			return false
-		}
-	}
-	return true
 }
 
 func (a *application) currentPaths() []string {

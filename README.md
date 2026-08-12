@@ -74,10 +74,16 @@ rather than by a panel that has been empty for a month.
 | `/metrics` | Metrics. Configurable with `--web.telemetry-path`. |
 | `/` | Landing page. |
 | `/-/healthy` | 200 while running; 503 once shutdown begins, so a load balancer can drain. |
-| `/-/ready` | 503 until every target has completed one scan, unless `--web.ready-requires-scan=false`. |
+| `/-/ready` | 503 until the first scan cycle finishes, unless `--web.ready-requires-scan=false`. |
 | `/-/reload` | Re-resolves targets. POST only, and off unless `--web.enable-lifecycle` is set. |
 
 `SIGHUP` also triggers a reload.
+
+Readiness tracks the **cycle**, not each target, and never returns to 503 once satisfied. Tying it
+to every target succeeding would let one permanently unreadable directory hold the whole exporter
+out of service while every other target reported fine; re-evaluating it per request would drop the
+exporter out of service each time a glob picked up a new directory. Per-target state is already
+visible — an unscanned target simply has no `dir_exporter_size_bytes` series.
 
 TLS and authentication come from `--web.config.file`, in the
 [standard exporter-toolkit format](https://github.com/prometheus/exporter-toolkit/blob/master/docs/web-configuration.md).

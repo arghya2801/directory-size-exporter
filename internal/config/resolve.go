@@ -101,6 +101,15 @@ func (r *Registry) Validate(caps fsstat.Capability, logger *slog.Logger) (*Resol
 	}
 	if cfg.ScanHardTimeout == 0 && cfg.ScanTimeout > 0 {
 		cfg.ScanHardTimeout = 2 * cfg.ScanTimeout
+		r.markDerived("scan.hard-timeout")
+	}
+
+	// Withdrawing a measurement sooner than the next scan can replace it makes the series flap in
+	// and out on every cycle, which reads as an exporter fault rather than as the staleness signal
+	// it is meant to be.
+	if cfg.ScanStaleAfter > 0 && cfg.ScanStaleAfter <= cfg.ScanInterval {
+		return nil, fmt.Errorf("--scan.stale-after (%s) must exceed --scan.interval (%s), or the measurement is withdrawn between every scan; allow room for the scan itself to run",
+			cfg.ScanStaleAfter, cfg.ScanInterval)
 	}
 
 	resolved := &Resolved{Config: cfg, Capabilities: caps, Disabled: map[string]string{}}
@@ -170,7 +179,11 @@ func (r *Registry) LogAudit(logger *slog.Logger, resolved *Resolved) {
 
 	logger.Info("Effective configuration", "settings", len(fields))
 	for _, f := range fields {
-		logger.Info("Setting resolved", "name", f.name, "value", f.value(), "source", string(f.source))
+		// Deliberately not keyed "source": promslog reserves that for the code location and renames
+		// any attribute that collides, so the audit key would silently differ between a plain
+		// handler and the one the binary actually uses — and an operator grepping the field name
+		// from the documentation would find nothing.
+		logger.Info("Setting resolved", "name", f.name, "value", f.value(), "origin", string(f.source))
 	}
 	for name, reason := range resolved.Disabled {
 		logger.Warn("Setting disabled by platform", "name", name, "reason", reason)
