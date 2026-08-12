@@ -112,12 +112,32 @@ that ordering is ever touched, re-run this mutation.
 Windows working tree is reported by `gofmt -l`, which buried the two files that genuinely needed
 formatting. CI now gates on `gofmt -l`.
 
-### P4 — `internal/collector` + `internal/server`
-- [ ] Descs, per-target collector, filesystem collector deduped by device ID
-- [ ] Self collectors: `go_*`, `process_*`, `build_info`, `platform_capability`
-- [ ] Landing page, `/-/healthy`, `/-/ready`, `/-/reload`
-- [ ] TLS + basic auth via `--web.config.file`; acceptance tests prove it
-- [ ] Replace the `/` → 404 assertion in `http_acceptance_test.go:49-51`
+### P4 — `internal/collector` + `internal/server` — **DONE**
+- [x] `descs.go`: every descriptor in one place, self-registering into `all` for `Describe`
+- [x] `collector.go`: renders `state.Snapshot` only — no decisions of its own, no filesystem access
+      during a scrape, so a hung mount can never slow a scrape
+- [x] `Recorder()` returns a `scan.Sink` feeding retention **and** the duration histogram together
+- [x] `filesystem.go`: `FilesystemCache` refreshed on the scan cycle (not on scrape), with the
+      statfs timeout and abandoned goroutine; capacity deduped by label set
+- [x] `self.go`: `go_*`, `process_*` (gateable) and `build_info` (never gated)
+- [x] `server.go`: landing page, `/-/healthy`, `/-/ready`, `/-/reload` (off by default, POST only)
+- [x] TLS **and** basic auth proven end-to-end through `web.Serve` with a real `--web.config.file`
+- [x] 22 tests green; `CollectAndLint` passes over the whole metric surface
+
+**Design note — checked registration.** `Describe` advertises every descriptor including gated-off
+ones. A collector that describes only part of what it emits registers *unchecked*, which silently
+forfeits the registry's duplicate-series and label-consistency checks. That surfaced immediately:
+the first run failed with 52 "unregistered descriptor" errors.
+
+**Design note — capacity is refreshed on the scan cycle, never on scrape.** `statfs` on a hung NFS
+mount blocks uninterruptibly, and a scrape must never be able to hang. Unlike directory sizes, a
+failed capacity read publishes **nothing** rather than retaining the previous value: free space is
+cheap to re-read and feeds directly into "hours until the volume fills", so a stale figure is worse
+than an absent one.
+
+**Note:** `internal/exporter/http_acceptance_test.go:49-51` still asserts `/` → 404. That is the OLD
+package, still wired to `main.go`; it is deleted in P6, so the assertion was left alone rather than
+edited twice.
 
 ### P5 — `internal/config` + `internal/targets`
 - [ ] kingpin flags + `DIR_EXPORTER_*` env + strict YAML; precedence `flag > env > yaml > default`
@@ -156,15 +176,21 @@ Windows while production is Linux.
 
 ## Current state
 
-**P-1, P0, P1, P2 and P3 complete and verified. Paused here at the user's request.**
+**P-1, P0, P1, P2, P3 and P4 complete and verified. Paused here at the user's request.**
 
-`internal/scan` is finished but **not yet wired into anything** — `cmd/directory-size-exporter`
-still runs the old `internal/exporter` collector, which carries only the P-1 hotfix. The new
-`fsstat` → `scan` → `state` pipeline has no collector in front of it yet.
+The full pipeline `fsstat` → `scan` → `state` → `collector` → `server` now exists and is tested
+end to end within each package, but **nothing is wired together yet**.
+`cmd/directory-size-exporter/main.go` still runs the old `internal/exporter` collector, which
+carries only the P-1 hotfix. So the shipped binary is safer than it was, but none of the new
+capability is live.
 
-**Next: P4 — `internal/collector` + `internal/server`.** That is the phase that makes the new
-pipeline observable: metric descriptors, the per-target collector reading `state.Snapshot`, the
-filesystem collector deduped by mountpoint, self collectors (`go_*`, `process_*`, `build_info`,
-`platform_capability`), and the server with a landing page, health/ready endpoints and TLS+auth via
-`--web.config.file`. Note `http_acceptance_test.go:49-51` asserts `/` returns 404 and must be
-updated when the landing page lands — that breakage is expected, not a regression.
+**Next: P5 — `internal/config` + `internal/targets`.**
+- kingpin flags + `DIR_EXPORTER_*` env + strict YAML, precedence `flag > env > yaml > default`
+  with per-field provenance tracking
+- `TestFlags_EveryConfigFieldHasAFlag` (reflection) to stop the flag surface drifting
+- Tri-state `true|false|auto` capability gating; `true` on an unsupported platform exits 2
+- Startup audit lines logging every setting with its source
+- Target resolver: glob expansion, `EvalSymlinks`, dedup, overlap detection, re-resolution
+  diffing, vanish grace period, `--targets.max`
+
+Then P6 wires `main.go` and deletes `internal/exporter`, and P7 adds `internal/schedprio`.
