@@ -157,11 +157,14 @@ The CI matrix builds and vets `linux/amd64`, `linux/arm64` and `windows/amd64`. 
 break silently on the platform you are not developing on, and here production is Linux while
 development is commonly Windows.
 
-## Known limitations
+## Deliberate boundaries
 
-- **Per-target scan tuning is not implemented.** The YAML file configures targets and global
-  settings; per-target intervals, timeouts and custom labels would need scheduler and collector
-  changes.
+- **Scan settings are global, not per target.** One `scan.interval` and one `scan.timeout` apply to
+  every target. This is intended, not a missing feature: the scan loop walks all targets in one
+  cycle and then waits, which is the right shape when targets are broadly similar in cost. A
+  per-target scheduler would mean per-target timers and overlapping cycles, and it is not wanted
+  for this workload.
+- **`target_path` is the only per-target label.** Custom labels are not supported.
 - **Windows is development parity only.** Allocated-block size and inode identity would each need
   a file handle per file, which is prohibitive at scale and unnecessary since production is Linux.
 - **No device-node names.** `FSInfo.Device` is the kernel device id (`major:minor`), not

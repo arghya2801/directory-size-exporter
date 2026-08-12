@@ -68,12 +68,16 @@ All green. Smoke-tested end to end: metrics, `/-/ready`, landing page, filesyste
    capability-dependent metric is approximated. Both were real defects.
 4. **No per-file error logging.** Enforced by `TestScan_NeverLogsPerFileErrors`.
 
-## Known gaps, deliberately not implemented
+## Out of scope, confirmed with the owner
 
-- **Per-target scan tuning.** The plan mentioned per-target interval/timeout/labels in YAML. The
-  YAML file configures targets and global settings only; per-target scheduling would need changes
-  in both the engine (one cycle currently scans all targets) and the collector. **This is the one
-  planned item not delivered.**
+- **Per-target scan tuning is not wanted.** One `scan.interval` and one `scan.timeout` for every
+  target is the intended behaviour, not a shortfall. The plan had floated per-target
+  interval/timeout in YAML; the owner confirmed a single global value is correct for this
+  workload. **Do not build a per-target scheduler unless that changes.**
+- **Custom per-target labels are not wanted.** `target_path` is the only per-target label.
+
+## Design decisions worth knowing
+
 - **kingpin bool flags.** kingpin treats booleans as valueless, so `--flag=true` would fail with
   "unexpected true". `Registry.NormalizeArgs` rewrites `=true`/`=false` into `--flag`/`--no-flag`
   so both spellings work; do not remove it without also fixing the docs, which use `=true`.
@@ -82,7 +86,6 @@ All green. Smoke-tested end to end: metrics, `/-/ready`, landing page, filesyste
 
 ## Possible follow-ups
 
-- Per-target scan tuning (above).
 - Raw `getdents64` parsing to remove the remaining per-entry allocation in the standard library.
 - Ship the alert rules from `README.md` as a packaged rules file.
 - Release automation: version ldflags are wired to `prometheus/common/version` but nothing sets them.
