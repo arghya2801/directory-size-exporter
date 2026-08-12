@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.5"
+
+jobs:
+  # The race detector is the reason this job exists separately: it needs cgo, and the Windows dev
+  # machine has no C toolchain, so Linux CI is the only place it actually runs. A green local test
+  # run is not evidence of race-freedom.
+  test:
+    name: Test (race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  # Build-tagged files (internal/fsstat, internal/schedprio) fail silently on the platform you are
+  # not developing on. Production is Linux; the dev machine is Windows. Both must compile and vet,
+  # and both test suites must pass, or a missing platform stub is only discovered in production.
+  cross-platform:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-latest
+          - goos: windows
+            goarch: amd64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build ./...
+      - name: Vet
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go vet ./...
+      # Only run tests where the target matches the runner; cross-compiled binaries cannot execute.
+      - name: Test
+        if: matrix.goarch == 'amd64'
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./...

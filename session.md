@@ -36,19 +36,38 @@ latency-sensitive application sharing the host.
       `TestSymlinkedTargetRootIsResolved`, `TestNonDirectoryTargetIsReportedAsFailedScan`
 - [x] `go test ./...`, `go vet ./...`, cross-GOOS build all green
 
-### P0 — Dependencies and CI
-- [x] **Network to the Go proxy confirmed working** — `go mod tidy` downloaded fresh modules, so the
-      kingpin gate is cleared. `client_golang/prometheus/testutil` is now a direct test dependency.
-- [ ] `go get github.com/alecthomas/kingpin/v2 gopkg.in/yaml.v3`
-- [ ] Promote `x/time`, `x/sync`, `x/sys` to direct deps
-- [ ] Cross-GOOS build+vet matrix (linux + windows) — must exist before the first build-tagged file
+### P0 — Dependencies and CI — **DONE**
+- [x] **Dependency gate cleared.** Proxy reachable; `go get` resolved every module the plan needs:
+      `kingpin/v2 v2.4.0` (pulling `alecthomas/units` and `xhit/go-str2duration/v2`) and
+      `yaml.v3 v3.0.1`. `x/time v0.15.0`, `x/sync v0.22.0`, `x/sys v0.47.0` are already in the
+      module graph. All are now warm in the local module cache.
+- [x] Reverted `go.mod`/`go.sum` afterwards — an unused requirement is noise that `go mod tidy`
+      strips anyway. P5 adds kingpin/yaml and P1/P7 promote `x/sys` **when the imports land**.
+- [x] `.github/workflows/ci.yml`: race job on Linux + cross-platform matrix
+      (linux/amd64, linux/arm64, windows/amd64) building and vetting every GOOS, plus a
+      `go mod tidy` drift check.
 
-### P1 — `internal/fsstat`
-- [ ] `fsstat.go`: `Dir` iface, `FileStat`, `FSInfo`, `Capability` bits, compile-time stub assertions
-- [ ] `fsstat_linux.go`: `openat`/`fstatat` w/ reused `Stat_t`, `statfs`, `AllocBytes = Blocks * 512`, mountpoint via `Dev` walk-up
-- [ ] `fsstat_windows.go`: `GetDiskFreeSpaceEx` only; `CapAllocBytes`/`CapInode` off
-- [ ] `fsstat_other.go`, `fake.go` (portable walker tests)
-- [ ] Tests incl. sparse-file alloc, hardlink Dev/Ino, `/proc` mountpoint
+### P1 — `internal/fsstat` — **DONE**
+- [x] `fsstat.go`: `FS` + `Dir` interfaces, `FileStat`, `FSInfo`, `Capability` bits,
+      compile-time `var _ FS = systemFS{}` assertion so a missing platform stub fails at compile
+      time on the offending GOOS rather than at link time
+- [x] `fsstat_linux.go`: `openat(O_NOFOLLOW|O_DIRECTORY|O_CLOEXEC)`, `fstatat` against the held
+      dirfd with a reused `unix.Stat_t`, `statfs`, `AllocBytes = Blocks * 512`, mountpoint via
+      `Dev` walk-up, fstype magic table. Arch-portable conversions (builds on arm64).
+- [x] `fsstat_windows.go`: `GetDiskFreeSpaceEx` + `GetVolumePathName` + `GetVolumeInformation`;
+      `CapAllocBytes`/`CapInode` deliberately withheld
+- [x] `fsstat_other.go`: caps 0, everything returns `ErrUnsupported` — still builds and runs
+- [x] `fake.go`: in-memory `FS` with shuffled reads, synthetic mega-directories, per-path
+      open/stat errors, before-open/read/stat hooks (for hung-mount tests), open-dir high-water
+      mark, and bare-name assertion. Concurrency-safe.
+- [x] Tests: portable (13), linux-only (9), windows-only (4). Windows suite green locally;
+      linux + arm64 + darwin all type-check via `GOOS=... go vet`.
+- [x] `x/sys` promoted to a direct dependency by `go mod tidy` as the import landed.
+
+**Design note — no device-node name.** `FSInfo.Device` is the kernel device id (`major:minor`),
+not `/dev/sda1`. Resolving a device name needs `/proc/self/mountinfo`, which races with concurrent
+mounts and shows the *host's* mount tree from inside a container. `Mountpoint` is the intended join
+key between a target and its filesystem, so the device name is not needed for any planned query.
 
 ### P2 — `internal/state` (test-first)
 - [ ] `TestStore_RetentionTable` written **before** `store.go`
@@ -109,4 +128,5 @@ Windows while production is Linux.
 
 ## Current state
 
-P-1 complete and verified. Next: P0 — add kingpin/yaml deps and the cross-GOOS CI matrix.
+P-1, P0 and P1 complete and verified. Next: P2 — `internal/state`, written test-first from the
+FR3 retention table.
