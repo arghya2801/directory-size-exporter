@@ -56,15 +56,17 @@ func New(store *state.Store, engine StatsProvider, fsCache *FilesystemCache, cap
 		// Deliberately not labelled by target: twenty targets times six outcomes times thirteen
 		// buckets is over fifteen hundred series for a single exporter. Per-target duration is
 		// already available as last_scan_duration_seconds.
+		//
+		// Outcomes are deliberately NOT pre-initialised either. Pre-creating them is worth it for
+		// counters, where a series that does not exist cannot be alerted on, but a histogram of
+		// durations for an outcome that has never happened is fifteen series describing the
+		// distribution of nothing. They appear when the outcome first occurs.
 		c.histogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: Namespace,
 			Name:      "scan_duration_seconds",
 			Help:      "Distribution of scan durations by outcome, across all targets.",
 			Buckets:   scanDurationBuckets,
 		}, []string{"result"})
-		for _, outcome := range state.AllOutcomes {
-			c.histogram.WithLabelValues(string(outcome))
-		}
 	}
 	return c
 }

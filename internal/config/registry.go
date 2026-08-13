@@ -138,8 +138,8 @@ func NewRegistry() *Registry {
 		help:     "Expose capacity of the filesystem holding each target, for share-of-volume and time-to-full queries."})
 	add(&field{name: "collector.self", kind: kindBool, ptr: &cfg.CollectorSelf, def: "true",
 		help: "Expose the exporter's own Go runtime and process metrics."})
-	add(&field{name: "collector.scan-histogram", kind: kindBool, ptr: &cfg.CollectorScanHistogram, def: "true",
-		help: "Expose the distribution of scan durations by outcome."})
+	add(&field{name: "collector.scan-histogram", kind: kindBool, ptr: &cfg.CollectorScanHistogram, def: "false",
+		help: "Expose the distribution of scan durations by outcome. Off by default: it costs a fixed ~90 series regardless of target count, which on a small deployment is more than the rest of the exporter combined, and scans are too infrequent for quantiles to say much. last_scan_duration_seconds and scans_total cover day-to-day needs."})
 
 	add(&field{name: "web.telemetry-path", kind: kindString, ptr: &cfg.WebTelemetryPath, def: "/metrics",
 		help: "Path under which to expose metrics."})

@@ -89,6 +89,11 @@ func TestDefaultsAreApplied(t *testing.T) {
 	if cfg.WebEnableLifecycle {
 		t.Error("web.enable-lifecycle defaults to true; an unauthenticated reload endpoint must be opt-in")
 	}
+	// The histogram costs a fixed ~90 series regardless of target count, which on a small
+	// deployment exceeds everything else the exporter emits put together.
+	if cfg.CollectorScanHistogram {
+		t.Error("collector.scan-histogram defaults to true; it should be opt-in on cardinality grounds")
+	}
 }
 
 func TestPrecedence_FlagBeatsEnvBeatsYAMLBeatsDefault(t *testing.T) {

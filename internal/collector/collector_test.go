@@ -367,6 +367,38 @@ func TestRecorder_FeedsBothRetentionAndHistogram(t *testing.T) {
 	}
 }
 
+// TestHistogram_OnlyCreatesSeriesForOutcomesThatHappened keeps the histogram's cost proportional
+// to what actually occurs.
+//
+// Pre-creating every outcome is worth it for counters, where a series that does not exist cannot
+// be alerted on. For a duration histogram it means fifteen series describing the distribution of
+// an event that has never happened, and with six outcomes that is ninety series on an exporter
+// that otherwise emits about fifty.
+func TestHistogram_OnlyCreatesSeriesForOutcomesThatHappened(t *testing.T) {
+	store, collector, _ := newHarness(t, allOptions(), fsstat.CapAllocBytes)
+	recorder := collector.Recorder()
+
+	if got := testutil.CollectAndCount(collector, Namespace+"_scan_duration_seconds"); got != 0 {
+		t.Fatalf("histogram published %d series before any scan, want 0", got)
+	}
+
+	recorder.Apply(completeScan(100))
+	afterOne := testutil.CollectAndCount(collector, Namespace+"_scan_duration_seconds")
+	if afterOne == 0 {
+		t.Fatal("histogram published nothing after a completed scan")
+	}
+
+	// A second outcome adds its own series; the four that never occur never appear.
+	recorder.Apply(state.Result{Target: target, Outcome: state.OutcomePartial, DurationSeconds: 3})
+	afterTwo := testutil.CollectAndCount(collector, Namespace+"_scan_duration_seconds")
+	if afterTwo != 2*afterOne {
+		t.Errorf("series after two outcomes = %d, want %d", afterTwo, 2*afterOne)
+	}
+	if store == nil {
+		t.Fatal("unreachable")
+	}
+}
+
 func histogramSampleCount(t *testing.T, collector *Collector, result string) uint64 {
 	t.Helper()
 	registry := prometheus.NewRegistry()

@@ -181,11 +181,20 @@ join.
 | `dir_exporter_current_scan_duration_seconds` | gauge | T |
 | `dir_exporter_last_scan_duration_seconds` | gauge | T |
 | `dir_exporter_scans_total` | counter | `{target_path, result}` |
-| `dir_exporter_scan_duration_seconds` | histogram | `{result}` |
+| `dir_exporter_scan_duration_seconds` | histogram | `{result}` (`--collector.scan-histogram`, **off** by default) |
 | `dir_exporter_scan_skipped_total` | counter | — |
 | `dir_exporter_abandoned_scan_workers` | gauge | — |
 
 `result` is one of `complete`, `partial`, `timeout`, `cancelled`, `missing`, `root_error`.
+
+The duration histogram is **off by default**. It costs about 90 series — thirteen buckets plus sum
+and count, per outcome — and that cost is fixed regardless of how many targets you monitor, so on a
+small deployment it is larger than everything else the exporter emits combined. Scans also run
+every few minutes at most, which is far too few samples for quantiles to mean much.
+`dir_exporter_last_scan_duration_seconds` gives you the current duration per target and
+`dir_exporter_scans_total` gives you outcome rates; reach for the histogram only when you
+specifically want duration *distributions* over long windows. When enabled, buckets appear for an
+outcome the first time it actually occurs.
 
 ### Errors and scan cost
 
