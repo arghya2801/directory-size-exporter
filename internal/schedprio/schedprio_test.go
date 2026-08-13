@@ -2,6 +2,8 @@ package schedprio
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"runtime"
 	"syscall"
@@ -60,6 +62,27 @@ func TestSupportedMatchesPlatform(t *testing.T) {
 	}
 }
 
+// TestWrappedErrnoIsRecognisedAsPermission verifies the assumption the Linux-only tests below
+// depend on, and does it on every platform so it cannot rot unnoticed.
+//
+// setpriority(2) returns EACCES when a caller lacks CAP_SYS_NICE to raise priority, and reserves
+// EPERM for an unrelated case. Both print as "permission denied", so a test asserting one specific
+// errno reads as correct and fails against the other. fs.ErrPermission covers both, and the same
+// mapping is what the scan error classifier relies on to group permission failures.
+func TestWrappedErrnoIsRecognisedAsPermission(t *testing.T) {
+	for name, errno := range map[string]syscall.Errno{
+		"EACCES": syscall.EACCES,
+		"EPERM":  syscall.EPERM,
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrapped := fmt.Errorf("set nice %d on thread %d: %w", 0, 1234, errno)
+			if !errors.Is(wrapped, fs.ErrPermission) {
+				t.Errorf("wrapped %s is not matched by fs.ErrPermission", name)
+			}
+		})
+	}
+}
+
 func TestApplyToCurrentThread(t *testing.T) {
 	// The goroutine must stay pinned: Go may otherwise migrate it and leave a deprioritised thread
 	// behind serving unrelated work.
@@ -109,9 +132,16 @@ func TestApplyToCurrentThread_RaisingPriorityNeedsPrivilege(t *testing.T) {
 	if err := ApplyToCurrentThread(Priority{Nice: 19}); err != nil {
 		t.Fatalf("lowering priority should never need privilege: %v", err)
 	}
-	if err := ApplyToCurrentThread(Priority{Nice: 0}); err == nil {
+
+	err := ApplyToCurrentThread(Priority{Nice: 0})
+	if err == nil {
 		t.Skip("this process may raise its own priority; nothing to assert")
-	} else if !errors.Is(err, syscall.EPERM) {
-		t.Errorf("raising priority failed with %v, want EPERM", err)
+	}
+	// fs.ErrPermission rather than a specific errno. setpriority(2) returns EACCES for "tried to
+	// raise priority without CAP_SYS_NICE" and reserves EPERM for a different case entirely, but
+	// both print as "permission denied" — so asserting on one errno looks right and fails. The
+	// portable sentinel covers both, and is the same mapping the scan error classifier relies on.
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("raising priority failed with %v, want a permission error", err)
 	}
 }
