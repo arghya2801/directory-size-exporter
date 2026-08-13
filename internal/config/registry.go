@@ -122,7 +122,7 @@ func NewRegistry() *Registry {
 		help: "Stop publishing a measurement once it is older than this; 0 never withdraws it."})
 
 	add(&field{name: "scan.nice", kind: kindInt, ptr: &cfg.ScanNice, def: "19",
-		help: "CPU nice value applied to scan worker threads only, so the HTTP server stays responsive. Linux only."})
+		help: "CPU nice value applied to scan worker threads only, so the HTTP server stays responsive. Linux only. Values BELOW the process's own nice value raise priority and need CAP_SYS_NICE; without it the scan runs at normal priority and logs a warning."})
 	add(&field{name: "scan.io-priority", kind: kindString, ptr: &cfg.ScanIOPriority, def: "idle",
 		help: "I/O priority class for scan worker threads: idle, best-effort or none. Linux only."})
 

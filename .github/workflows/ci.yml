@@ -38,6 +38,12 @@ jobs:
           fi
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # A second pass pinned to one CPU. Several tests depend on goroutines making progress while
+      # another is running, and on a multi-core developer machine that always happens; on a
+      # constrained runner it may not. This pass is what catches cancellation or scheduling
+      # assumptions that only hold when cores are plentiful.
+      - name: Test under CPU contention
+        run: GOMAXPROCS=1 go test -count=2 ./...
 
   # Build-tagged files (internal/fsstat, internal/schedprio) fail silently on the platform you are
   # not developing on. Production is Linux; the dev machine is Windows. Both must compile and vet,
@@ -58,6 +64,9 @@ jobs:
           - goos: windows
             goarch: amd64
             runner: windows-latest
+          - goos: windows
+            goarch: arm64
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -76,6 +85,8 @@ jobs:
           CGO_ENABLED: "0"
         run: go vet ./...
       # Only run tests where the target matches the runner; cross-compiled binaries cannot execute.
+      # The arm64 entries therefore verify that the build-tagged platform files compile and vet,
+      # which is the failure this matrix exists to catch.
       - name: Test
         if: matrix.goarch == 'amd64'
         env:

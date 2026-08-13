@@ -203,13 +203,24 @@ func (e *Engine) ScanAll(ctx context.Context, targets []string, sink Sink) bool 
 			continue
 		}
 
+		// The deadline is established here, before any work is queued, and stored on the target so
+		// workers read it directly. Deriving it inside the supervisor instead would make
+		// cancellation depend on that goroutine being scheduled to flip a flag, which on a busy or
+		// single-core host it may not be for a long time.
+		scanCtx, cancel := ctx, context.CancelFunc(func() {})
+		if e.cfg.ScanTimeout > 0 {
+			scanCtx, cancel = context.WithTimeout(ctx, e.cfg.ScanTimeout)
+		}
+		target.ctx = scanCtx
+
 		target.addPending(1)
 		work.push([]*dirRef{{path: path, target: target}}, nil)
 
 		supervisors.Add(1)
 		go func() {
 			defer supervisors.Done()
-			e.supervise(ctx, target, sink)
+			defer cancel()
+			e.supervise(ctx, scanCtx, target, sink)
 		}()
 	}
 	supervisors.Wait()
@@ -274,14 +285,10 @@ func (e *Engine) prepareRoot(target *targetScan) (state.Outcome, bool) {
 }
 
 // supervise waits for one target's walk to finish, enforcing both timeouts, and reports the result.
-func (e *Engine) supervise(ctx context.Context, target *targetScan, sink Sink) {
-	scanCtx := ctx
-	var cancel context.CancelFunc = func() {}
-	if e.cfg.ScanTimeout > 0 {
-		scanCtx, cancel = context.WithTimeout(ctx, e.cfg.ScanTimeout)
-	}
-	defer cancel()
-
+//
+// scanCtx is created by the caller before any work is queued, so workers observe cancellation
+// themselves rather than waiting for this goroutine to be scheduled.
+func (e *Engine) supervise(ctx, scanCtx context.Context, target *targetScan, sink Sink) {
 	stopHeartbeat := e.startHeartbeat(target)
 	defer stopHeartbeat()
 
@@ -292,10 +299,9 @@ func (e *Engine) supervise(ctx context.Context, target *targetScan, sink Sink) {
 	select {
 	case <-target.done:
 	case <-scanCtx.Done():
-		// Workers check this flag once per batch, so the walk stops within roughly one batch of
-		// the deadline rather than after the next full directory.
-		target.cancelled.Store(true)
-
+		// Workers read this same context once per batch, so the walk has already begun stopping
+		// by the time this fires; nothing needs to be signalled to them here.
+		//
 		// This wait must have a deadline of its own rather than reusing the hard timer. On process
 		// shutdown workers return as soon as they notice the root context, which can leave this
 		// target's queue undrained so its latch never fires. With --scan.timeout unset the hard
@@ -385,7 +391,7 @@ func (e *Engine) worker(ctx context.Context, work *pool) {
 			return
 		}
 		target := ref.target
-		if target.cancelled.Load() || target.abandoned.Load() {
+		if target.stopping() {
 			// Discard without touching the filesystem, so a cancelled target's queue drains
 			// immediately and its latch fires promptly instead of after thousands more syscalls.
 			target.completeDir()

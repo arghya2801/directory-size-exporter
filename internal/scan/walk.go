@@ -47,7 +47,7 @@ func (e *Engine) processDir(ctx context.Context, ref *dirRef, st *fsstat.FileSta
 
 	var children []*dirRef
 	for {
-		if target.cancelled.Load() || target.abandoned.Load() {
+		if target.stopping() {
 			break
 		}
 		entries, err := dir.ReadSome(e.cfg.BatchSize)

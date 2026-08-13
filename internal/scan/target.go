@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,13 +68,23 @@ type targetScan struct {
 	done     chan struct{}
 	doneOnce sync.Once
 
-	// cancelled is a plain atomic rather than a context, because it is read once per batch by
-	// every worker. context.Context.Err takes a mutex, which at ten million entries is both a cost
-	// and a contention point shared across all workers.
-	cancelled atomic.Bool
+	// ctx carries this target's deadline. Workers consult it once per read batch — never per
+	// entry, where taking the context's mutex ten million times would be both a cost and a
+	// contention point shared across every worker.
+	//
+	// It is deliberately the context itself rather than a flag some other goroutine sets from it.
+	// A flag makes cancellation latency depend on that goroutine being scheduled, which on a busy
+	// or single-core host let a cancelled walk run on for tens of batches past its deadline.
+	ctx context.Context
+
 	// abandoned marks a target given up on after the hard timeout, so workers discard its
 	// remaining queue without performing any I/O.
 	abandoned atomic.Bool
+}
+
+// stopping reports whether this target should stop being walked.
+func (t *targetScan) stopping() bool {
+	return t.abandoned.Load() || (t.ctx != nil && t.ctx.Err() != nil)
 }
 
 func newTargetScan(path string, startedAt time.Time, maxTracked int) *targetScan {

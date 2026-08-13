@@ -2,7 +2,9 @@ package schedprio
 
 import (
 	"errors"
+	"os"
 	"runtime"
+	"syscall"
 	"testing"
 )
 
@@ -84,7 +86,32 @@ func TestApplyToCurrentThread_NoneLeavesIOPriorityAlone(t *testing.T) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	if err := ApplyToCurrentThread(Priority{Nice: 10, IOClass: IOClassNone}); err != nil {
+	// Nice 19 specifically, not an arbitrary middle value. Go may hand this test the same OS
+	// thread a previous test already lowered to 19, and moving a thread back UP the priority scale
+	// requires CAP_SYS_NICE, which an unprivileged CI runner does not have. 19 is the floor, so it
+	// is always a lowering or a no-op and never needs privilege.
+	if err := ApplyToCurrentThread(Priority{Nice: 19, IOClass: IOClassNone}); err != nil {
 		t.Fatalf("applying nice without an I/O class failed: %v", err)
+	}
+}
+
+// TestApplyToCurrentThread_RaisingPriorityNeedsPrivilege documents the asymmetry that made the
+// test above fragile, and confirms the engine's decision to treat this as a warning rather than a
+// fatal error: an operator asking for a nice value below the process's current one gets a scan at
+// normal priority, not no scan at all.
+func TestApplyToCurrentThread_RaisingPriorityNeedsPrivilege(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("needs an unprivileged Linux process")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	if err := ApplyToCurrentThread(Priority{Nice: 19}); err != nil {
+		t.Fatalf("lowering priority should never need privilege: %v", err)
+	}
+	if err := ApplyToCurrentThread(Priority{Nice: 0}); err == nil {
+		t.Skip("this process may raise its own priority; nothing to assert")
+	} else if !errors.Is(err, syscall.EPERM) {
+		t.Errorf("raising priority failed with %v, want EPERM", err)
 	}
 }
