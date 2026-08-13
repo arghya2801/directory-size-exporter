@@ -523,6 +523,41 @@ func TestValidate_HardTimeoutMustExceedScanTimeout(t *testing.T) {
 	}
 }
 
+// TestValidate_HardTimeoutAlwaysHasAValue is the guard for the failure mode the hard timeout
+// exists to prevent.
+//
+// It is the only thing that reclaims a scan whose worker is stuck in an uninterruptible filesystem
+// call, and a stuck scan blocks the cycle permanently rather than merely failing — no further scan
+// ever runs, and the abandoned-worker gauge never moves because it is only written once a cycle
+// completes. Deriving it solely from scan.timeout left the DEFAULT configuration, where
+// scan.timeout is disabled, with no protection at all.
+func TestValidate_HardTimeoutAlwaysHasAValue(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+		want time.Duration
+	}{
+		{"defaults, no scan timeout", nil, defaultHardTimeoutBackstop},
+		{"derived from scan timeout", []string{"--scan.timeout=10m"}, 20 * time.Minute},
+		{"explicit wins", []string{"--scan.timeout=10m", "--scan.hard-timeout=45m"}, 45 * time.Minute},
+		{"explicit without a scan timeout", []string{"--scan.hard-timeout=2h"}, 2 * time.Hour},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			resolved, err := validate(t, append([]string{"--path.target=/x"}, testCase.args...), allCaps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.ScanHardTimeout != testCase.want {
+				t.Errorf("hard timeout = %s, want %s", resolved.ScanHardTimeout, testCase.want)
+			}
+			// Whatever the route, it must never end up unbounded.
+			if resolved.ScanHardTimeout <= 0 {
+				t.Error("hard timeout is disabled; a stuck worker would stall scanning forever")
+			}
+		})
+	}
+}
+
 // TestValidate_StaleAfterMustExceedScanInterval catches a setting that makes the size series flap
 // in and out on every cycle, which reads as an exporter fault rather than as the staleness signal
 // it is meant to be.

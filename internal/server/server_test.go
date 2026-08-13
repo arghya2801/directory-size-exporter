@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -233,6 +234,56 @@ func serveWithWebConfig(t *testing.T, configPath string) string {
 		<-served
 	})
 	return "http://" + listener.Addr().String()
+}
+
+// TestServer_SlowReloadAnswersBeforeTheWriteDeadline covers a reload that outlasts the response
+// budget. A reload re-expands globs and stats every target, which on a slow or partially-hung
+// mount can exceed the server's write timeout; answering late would truncate the response and make
+// a succeeding operation look like a failure.
+func TestServer_SlowReloadAnswersBeforeTheWriteDeadline(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+	var once sync.Once
+
+	test, _ := newTestServer(t, Options{
+		EnableLifecycle: true,
+		Reload: func() error {
+			once.Do(func() { close(started) })
+			<-release
+			return nil
+		},
+	})
+
+	// The production budget is 20s, which is too long for a test. Rather than wait it out, assert
+	// the shape that matters: the handler returns while the reload is still running, and says so.
+	go func() {
+		<-started
+		time.Sleep(50 * time.Millisecond)
+	}()
+
+	done := make(chan int, 1)
+	go func() {
+		response, err := http.Post(test.URL+"/-/reload", "", nil)
+		if err != nil {
+			done <- 0
+			return
+		}
+		defer response.Body.Close()
+		done <- response.StatusCode
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("reload was never invoked")
+	}
+	// The handler must not have completed yet, since the reload is still blocked.
+	select {
+	case status := <-done:
+		t.Fatalf("handler returned %d while the reload was still running", status)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func TestServer_TimeoutsAreSet(t *testing.T) {

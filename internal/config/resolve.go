@@ -12,6 +12,10 @@ import (
 	"github.com/local/directory-size-exporter/internal/fsstat"
 )
 
+// defaultHardTimeoutBackstop bounds a scan when no scan timeout is configured. It exists purely so
+// that "no timeout configured" never means "wait forever on a stuck worker".
+const defaultHardTimeoutBackstop = 24 * time.Hour
+
 // Resolved is the configuration after validation and capability gating, with every tristate
 // collapsed to a plain boolean. Downstream packages take this rather than Config so they cannot
 // accidentally act on an unresolved tristate.
@@ -113,8 +117,26 @@ func (r *Registry) Validate(caps fsstat.Capability, logger *slog.Logger) (*Resol
 		return nil, fmt.Errorf("--scan.hard-timeout (%s) must exceed --scan.timeout (%s), or a merely slow target is abandoned",
 			cfg.ScanHardTimeout, cfg.ScanTimeout)
 	}
-	if cfg.ScanHardTimeout == 0 && cfg.ScanTimeout > 0 {
-		cfg.ScanHardTimeout = 2 * cfg.ScanTimeout
+	// The hard timeout is the only thing that reclaims a scan whose worker is stuck in an
+	// uninterruptible filesystem call, and a stuck scan blocks the cycle permanently rather than
+	// just failing. It must therefore always have a value.
+	//
+	// Deriving it solely from scan.timeout left the default configuration — where scan.timeout is
+	// disabled — with no protection at all against the exact failure this engine is built to
+	// survive, and with no metric to reveal it either, since the abandoned-worker gauge is only
+	// written once a cycle finishes.
+	if cfg.ScanHardTimeout == 0 {
+		if cfg.ScanTimeout > 0 {
+			cfg.ScanHardTimeout = 2 * cfg.ScanTimeout
+		} else {
+			// Far above any plausible walk, so it can only fire on a genuinely stuck worker rather
+			// than on a merely slow tree. A heavily rate-limited scan of a very large tree can
+			// legitimately exceed this, which is why it stays configurable.
+			cfg.ScanHardTimeout = defaultHardTimeoutBackstop
+			logger.Warn("No --scan.timeout is set, so scans are unbounded; applying a hard-timeout backstop so a hung mount cannot stall scanning forever",
+				"scan.hard-timeout", cfg.ScanHardTimeout,
+				"suggestion", "set --scan.timeout to bound normal scans, or raise --scan.hard-timeout if a single scan legitimately runs longer than this")
+		}
 		r.markDerived("scan.hard-timeout")
 	}
 

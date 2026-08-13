@@ -467,7 +467,14 @@ func (p *pool) push(refs []*dirRef, local *[]*dirRef) {
 			share = free
 		}
 		p.deque = append(p.deque, (*local)[:share]...)
-		*local = append((*local)[:0], (*local)[share:]...)
+		// Shift the remainder down and clear the vacated tail. Reslicing alone would leave the
+		// backing array still pointing at the donated directories, keeping their paths reachable
+		// long after the shared queue has finished with them.
+		kept := copy(*local, (*local)[share:])
+		for i := kept; i < len(*local); i++ {
+			(*local)[i] = nil
+		}
+		*local = (*local)[:kept]
 		p.cond.Broadcast()
 	}
 	p.mu.Unlock()

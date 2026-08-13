@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -104,6 +105,10 @@ type application struct {
 	// dated log paths. A newly added target that has not been scanned yet is already visible: its
 	// size series is absent and its scan_age is unset.
 	firstCycleComplete atomic.Bool
+
+	// reloadMu serialises target reloads, which the refresh loop, SIGHUP and the reload endpoint
+	// can all trigger. See reload.
+	reloadMu sync.Mutex
 }
 
 func newApp(cfg *config.Resolved, logger *slog.Logger) (*application, error) {
@@ -309,7 +314,14 @@ func (a *application) refreshLoop(ctx context.Context) {
 }
 
 // reload re-resolves targets and applies the result. It is also what SIGHUP and /-/reload call.
+//
+// Serialised because resolving and applying are two individually-locked steps, and the refresh
+// loop, SIGHUP and the reload endpoint can all call this. Two interleaved reloads could apply an
+// older resolution last, leaving the store holding a stale target set until the next refresh.
 func (a *application) reload() error {
+	a.reloadMu.Lock()
+	defer a.reloadMu.Unlock()
+
 	resolution, err := a.resolver.Resolve()
 	if err != nil {
 		return err

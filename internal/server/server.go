@@ -88,17 +88,38 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	writePlain(w, http.StatusOK, "READY")
 }
 
+// reloadResponseTimeout bounds how long a reload request waits before answering. It sits below the
+// server's write timeout on purpose: a reload re-expands globs and stats every target, which on a
+// slow or partially-hung mount can outlast the write deadline. Without this the response would be
+// truncated mid-flight and the caller would read a failure for an operation that actually
+// succeeded.
+const reloadResponseTimeout = 20 * time.Second
+
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		w.Header().Set("Allow", "POST, PUT")
 		http.Error(w, "reload requires POST", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.opts.Reload(); err != nil {
-		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
-		return
+
+	// Buffered so the goroutine can finish and exit even once nobody is waiting for it.
+	done := make(chan error, 1)
+	go func() { done <- s.opts.Reload() }()
+
+	timer := time.NewTimer(reloadResponseTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writePlain(w, http.StatusOK, "reloaded")
+	case <-timer.C:
+		// The reload is still running and will finish; only the answer is being cut short.
+		writePlain(w, http.StatusAccepted,
+			"reload is taking longer than "+reloadResponseTimeout.String()+" and is continuing in the background")
 	}
-	writePlain(w, http.StatusOK, "reloaded")
 }
 
 func writePlain(w http.ResponseWriter, status int, body string) {

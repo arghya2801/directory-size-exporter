@@ -89,7 +89,7 @@ func NewRegistry() *Registry {
 	add(&field{name: "scan.timeout", kind: kindDuration, ptr: &cfg.ScanTimeout, def: "0",
 		help: "Maximum duration of one target's scan; 0 disables it."})
 	add(&field{name: "scan.hard-timeout", kind: kindDuration, ptr: &cfg.ScanHardTimeout, def: "0",
-		help: "Point at which a target is abandoned without waiting for workers presumed stuck on a hung mount; 0 defaults to twice scan.timeout."})
+		help: "Point at which a target is abandoned without waiting for workers presumed stuck on a hung mount. 0 means derive it: twice scan.timeout, or a 24h backstop when scan.timeout is disabled. It cannot be switched off, because an unbounded wait stalls all future scans."})
 	add(&field{name: "scan.worker-drain-timeout", kind: kindDuration, ptr: &cfg.ScanWorkerDrainTimeout, def: "5s",
 		help: "How long to wait for scan workers to exit before declaring them leaked."})
 	add(&field{name: "scan.statfs-timeout", kind: kindDuration, ptr: &cfg.ScanStatfsTimeout, def: "5s",

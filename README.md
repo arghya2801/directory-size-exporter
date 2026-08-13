@@ -199,10 +199,18 @@ volume, and duplicating capacity per target would create conflicting series.
 | `dir_exporter_last_scan_duration_seconds` | gauge | `target_path` | How long the last scan took. Use this to size `--scan.timeout` and `--scan.interval`. |
 | `dir_exporter_scans_total` | counter | `target_path`, `result` | Scans by outcome. `rate()` on `result="partial"` or `"timeout"` shows how often a target is failing. |
 | `dir_exporter_scan_duration_seconds` | histogram | `result` | Distribution of scan durations. See the note below. |
-| `dir_exporter_scan_skipped_total` | counter | — | Cycles skipped because the previous one was still running. Rising means `--scan.interval` is shorter than a scan takes. |
+| `dir_exporter_scan_skipped_total` | counter | — | Cycles rejected because one was already running. Expected to stay at `0`: the scan loop is sequential, so this only moves if something else drives a scan concurrently. Not a tuning signal — see below. |
 | `dir_exporter_abandoned_scan_workers` | gauge | — | Workers that never exited, presumed stuck on a hung mount. Sustained values at or above `--scan.concurrency` mean the worker pool is dead and the exporter needs restarting. |
 
 `result` is one of `complete`, `partial`, `timeout`, `cancelled`, `missing`, `root_error`.
+
+**How often scans actually happen.** `--scan.interval` is the gap *after* a cycle ends, not a fixed
+schedule, so the real period is `last_scan_duration_seconds + scan.interval`. A tree that takes
+twenty minutes to walk on a five-minute interval is scanned every twenty-five minutes, not every
+five — quietly, with nothing to flag it. If freshness matters, compare
+`dir_exporter_last_scan_duration_seconds` against your configured interval, or alert on
+`dir_exporter_scan_age_seconds`. `scan_skipped_total` does **not** report this; cycles are
+sequential, so nothing is ever skipped.
 
 The duration histogram is **off by default** (`--collector.scan-histogram`). It costs about 90
 series — thirteen buckets plus sum and count, per outcome — and that cost is fixed regardless of
