@@ -1,0 +1,9 @@
+# Go tooling writes LF and gofmt treats CRLF files as unformatted. Without this, every Go file in
+# a Windows working tree is reported by `gofmt -l`, which buries genuine formatting problems in
+# noise and makes the CI check impossible to reproduce locally.
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
