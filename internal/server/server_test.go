@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -236,53 +238,131 @@ func serveWithWebConfig(t *testing.T, configPath string) string {
 	return "http://" + listener.Addr().String()
 }
 
+// logCapture records log records so a test can assert on what was reported outside a response.
+type logCapture struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (h *logCapture) WithAttrs([]slog.Attr) slog.Handler       { return h }
+func (h *logCapture) WithGroup(string) slog.Handler            { return h }
+
+func (h *logCapture) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *logCapture) messages() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.records))
+	for _, record := range h.records {
+		out = append(out, record.Message)
+	}
+	return out
+}
+
 // TestServer_SlowReloadAnswersBeforeTheWriteDeadline covers a reload that outlasts the response
 // budget. A reload re-expands globs and stats every target, which on a slow or partially-hung
 // mount can exceed the server's write timeout; answering late would truncate the response and make
 // a succeeding operation look like a failure.
 func TestServer_SlowReloadAnswersBeforeTheWriteDeadline(t *testing.T) {
 	release := make(chan struct{})
-	defer close(release)
-	started := make(chan struct{})
-	var once sync.Once
-
 	test, _ := newTestServer(t, Options{
 		EnableLifecycle: true,
+		ReloadTimeout:   50 * time.Millisecond,
 		Reload: func() error {
-			once.Do(func() { close(started) })
 			<-release
 			return nil
 		},
 	})
 
-	// The production budget is 20s, which is too long for a test. Rather than wait it out, assert
-	// the shape that matters: the handler returns while the reload is still running, and says so.
-	go func() {
-		<-started
-		time.Sleep(50 * time.Millisecond)
-	}()
-
-	done := make(chan int, 1)
-	go func() {
-		response, err := http.Post(test.URL+"/-/reload", "", nil)
-		if err != nil {
-			done <- 0
-			return
-		}
-		defer response.Body.Close()
-		done <- response.StatusCode
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("reload was never invoked")
+	response, err := http.Post(test.URL+"/-/reload", "", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The handler must not have completed yet, since the reload is still blocked.
-	select {
-	case status := <-done:
-		t.Fatalf("handler returned %d while the reload was still running", status)
-	case <-time.After(200 * time.Millisecond):
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	close(release)
+
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 while the reload is still running", response.StatusCode)
+	}
+	if !strings.Contains(string(body), "background") {
+		t.Errorf("body = %q, want it to say the reload is continuing", body)
+	}
+}
+
+// TestServer_SlowReloadFailureIsLogged is the guard against losing an error entirely.
+//
+// Once the response deadline fires the caller has already been told the reload is continuing, so
+// an error arriving afterwards has nowhere left to go. That is the worst case to drop: slowness
+// and failure share a cause, a struggling filesystem, so the reload most likely to fail is the one
+// most likely to answer late. Without this the operator reads 202 and concludes it worked.
+func TestServer_SlowReloadFailureIsLogged(t *testing.T) {
+	release := make(chan struct{})
+	logs := &logCapture{}
+	test, _ := newTestServer(t, Options{
+		EnableLifecycle: true,
+		ReloadTimeout:   50 * time.Millisecond,
+		Logger:          slog.New(logs),
+		Reload: func() error {
+			<-release
+			return errors.New("glob expanded past --targets.max")
+		},
+	})
+
+	response, err := http.Post(test.URL+"/-/reload", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", response.StatusCode)
+	}
+
+	// The caller has been answered; only now does the reload fail.
+	close(release)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, message := range logs.messages() {
+			if strings.Contains(message, "Reload failed") {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("a reload that failed after the response deadline was never logged; messages: %v", logs.messages())
+}
+
+func TestServer_FastReloadFailureIsReportedAndLogged(t *testing.T) {
+	logs := &logCapture{}
+	test, _ := newTestServer(t, Options{
+		EnableLifecycle: true,
+		Logger:          slog.New(logs),
+		Reload:          func() error { return errors.New("boom") },
+	})
+
+	response, err := http.Post(test.URL+"/-/reload", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", response.StatusCode)
+	}
+	var logged bool
+	for _, message := range logs.messages() {
+		if strings.Contains(message, "Reload failed") {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Error("a reload failure returned in the response was not logged")
 	}
 }
 

@@ -3,6 +3,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,12 @@ type Options struct {
 	// Ready reports whether the exporter has enough data to be worth scraping. The caller decides
 	// what that means; see the note on readiness in README.
 	Ready func() bool
+	// ReloadTimeout bounds how long a reload request waits before answering. Zero uses
+	// defaultReloadTimeout.
+	ReloadTimeout time.Duration
+	// Logger records outcomes that no longer have a request to be reported on, which is the whole
+	// reason it exists here; see handleReload.
+	Logger *slog.Logger
 }
 
 // Server wires the registry and operational endpoints into an http.Server.
@@ -88,12 +95,12 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	writePlain(w, http.StatusOK, "READY")
 }
 
-// reloadResponseTimeout bounds how long a reload request waits before answering. It sits below the
+// defaultReloadTimeout bounds how long a reload request waits before answering. It sits below the
 // server's write timeout on purpose: a reload re-expands globs and stats every target, which on a
 // slow or partially-hung mount can outlast the write deadline. Without this the response would be
 // truncated mid-flight and the caller would read a failure for an operation that actually
 // succeeded.
-const reloadResponseTimeout = 20 * time.Second
+const defaultReloadTimeout = 20 * time.Second
 
 func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
@@ -102,11 +109,27 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reload outlives this request when it is slow, so its outcome is logged from inside the
+	// goroutine rather than only reported through the response.
+	//
+	// Reporting it through the response alone loses it entirely on the slow path: once the
+	// deadline below fires the caller has already been told the reload is continuing, and an error
+	// arriving afterwards would have nowhere left to go. That is the worst case to drop, because
+	// slowness and failure share a cause — a struggling filesystem — so the reload most likely to
+	// fail is exactly the one most likely to answer late. The caller would read 202 and conclude
+	// the reload worked.
+	//
 	// Buffered so the goroutine can finish and exit even once nobody is waiting for it.
 	done := make(chan error, 1)
-	go func() { done <- s.opts.Reload() }()
+	go func() {
+		err := s.opts.Reload()
+		if err != nil {
+			s.logger().Error("Reload failed", "err", err)
+		}
+		done <- err
+	}()
 
-	timer := time.NewTimer(reloadResponseTimeout)
+	timer := time.NewTimer(s.reloadTimeout())
 	defer timer.Stop()
 	select {
 	case err := <-done:
@@ -116,10 +139,25 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 		}
 		writePlain(w, http.StatusOK, "reloaded")
 	case <-timer.C:
-		// The reload is still running and will finish; only the answer is being cut short.
+		// Still running and will finish; only the answer is being cut short. Whatever it returns
+		// is logged by the goroutine above.
 		writePlain(w, http.StatusAccepted,
-			"reload is taking longer than "+reloadResponseTimeout.String()+" and is continuing in the background")
+			"reload is taking longer than "+s.reloadTimeout().String()+" and is continuing in the background; check the logs for its outcome")
 	}
+}
+
+func (s *Server) reloadTimeout() time.Duration {
+	if s.opts.ReloadTimeout > 0 {
+		return s.opts.ReloadTimeout
+	}
+	return defaultReloadTimeout
+}
+
+func (s *Server) logger() *slog.Logger {
+	if s.opts.Logger != nil {
+		return s.opts.Logger
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 func writePlain(w http.ResponseWriter, status int, body string) {

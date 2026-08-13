@@ -216,6 +216,7 @@ func (a *application) serve(webFlags *web.FlagConfig, logger *slog.Logger) error
 		ReadyRequiresScan: a.cfg.WebReadyRequiresScan,
 		Ready:             a.firstCycleComplete.Load,
 		Reload:            a.reload,
+		Logger:            logger,
 	})
 
 	go a.scanLoop(ctx)
@@ -286,14 +287,7 @@ func (a *application) runCycle(ctx context.Context) {
 	}
 }
 
-func (a *application) currentPaths() []string {
-	snapshots := a.store.Snapshot()
-	paths := make([]string, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		paths = append(paths, snapshot.Target)
-	}
-	return paths
-}
+func (a *application) currentPaths() []string { return a.store.Targets() }
 
 // refreshLoop re-expands glob patterns so directories created after startup are picked up without
 // a restart, which on a host with dated log paths is the difference between monitoring today's
@@ -319,7 +313,15 @@ func (a *application) refreshLoop(ctx context.Context) {
 // loop, SIGHUP and the reload endpoint can all call this. Two interleaved reloads could apply an
 // older resolution last, leaving the store holding a stale target set until the next refresh.
 func (a *application) reload() error {
-	a.reloadMu.Lock()
+	// Coalesced rather than queued. Reloads are idempotent, so a request arriving while one is
+	// already running would only repeat the same glob expansion and stat of every target — and
+	// since the endpoint accepts requests faster than a slow reload completes, queueing them would
+	// let a caller pile up arbitrary filesystem work on the very host the exporter is trying not
+	// to disturb.
+	if !a.reloadMu.TryLock() {
+		a.logger.Debug("Reload already in progress; the running one will observe the same state")
+		return nil
+	}
 	defer a.reloadMu.Unlock()
 
 	resolution, err := a.resolver.Resolve()

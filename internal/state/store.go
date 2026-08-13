@@ -344,6 +344,17 @@ func (s *Store) Snapshot() []Snapshot {
 	return snapshots
 }
 
+// Targets returns the tracked target paths in configuration order.
+//
+// Separate from Snapshot because a caller that only needs the list should not pay for the deep
+// copies a scrape requires: Snapshot duplicates three maps per target so a scrape cannot mutate
+// store state, and on the scan path every one of those allocations is discarded immediately.
+func (s *Store) Targets() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]string(nil), s.order...)
+}
+
 // SnapshotFor returns the published view of one target.
 func (s *Store) SnapshotFor(target string) (Snapshot, bool) {
 	s.mu.RLock()

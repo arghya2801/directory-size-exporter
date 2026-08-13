@@ -127,6 +127,44 @@ dir_exporter_platform_capability{capability="mountpoint"} 0
 	}
 }
 
+// TestCollector_GrowthCountersSurviveStaleness checks that cumulative history is not withdrawn
+// along with the measurement.
+//
+// A counter that goes present, absent, then present again is the one transition counters must not
+// make, and it makes increase() across the gap unreliable. Staleness says the latest reading is
+// too old to trust; it says nothing about the growth that already happened.
+func TestCollector_GrowthCountersSurviveStaleness(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	store := state.New([]string{target}, state.Options{Now: clock.Now, StaleAfter: time.Minute})
+	cache := NewFilesystemCache(fsstat.NewFake(0), time.Second, nil)
+	collector := New(store, stubStats{}, cache, 0, allOptions())
+
+	store.Apply(completeScan(100))
+	clock.advance(time.Second)
+	store.Apply(completeScan(180))
+
+	if got := testutil.CollectAndCount(collector, Namespace+"_bytes_added_total"); got != 1 {
+		t.Fatalf("bytes_added_total series = %d before staleness, want 1", got)
+	}
+
+	// Past the staleness threshold the size is withdrawn, but the history behind it is unchanged.
+	clock.advance(2 * time.Minute)
+	if got := testutil.CollectAndCount(collector, Namespace+"_size_bytes"); got != 0 {
+		t.Errorf("size_bytes = %d series once stale, want 0", got)
+	}
+	if got := testutil.CollectAndCount(collector, Namespace+"_bytes_added_total"); got != 1 {
+		t.Errorf("bytes_added_total = %d series once stale, want 1; the counter disappeared", got)
+	}
+	if got := gaugeValue(t, collector, Namespace+"_scan_age_seconds", "target_path", target); got <= 0 {
+		t.Errorf("scan_age_seconds = %v, want the staleness to stay visible", got)
+	}
+}
+
+type fakeClock struct{ now time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+
 func TestCollector_GatedFamiliesAbsentWhenDisabled(t *testing.T) {
 	store, collector, _ := newHarness(t, Options{}, fsstat.CapAllocBytes|fsstat.CapInode)
 	store.Apply(completeScan(100))

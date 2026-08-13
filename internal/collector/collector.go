@@ -153,6 +153,16 @@ func (c *Collector) collectTarget(ch chan<- prometheus.Metric, snap *state.Snaps
 		gauge(ch, d.scanAge, snap.ScanAgeSeconds, target)
 	}
 
+	// Cumulative growth is history, not a current measurement, so it survives the measurement
+	// being withdrawn as stale. Gating it on HasGood alongside the size would make a counter go
+	// present, absent, then present again — the one transition counters must not make, and enough
+	// to make increase() across the gap unreliable. Absent before the first completed scan is
+	// still correct, since there is genuinely no history yet.
+	if c.opts.Growth && snap.LastGoodTimestamp > 0 {
+		counter(ch, d.bytesAdded, float64(snap.BytesAddedTotal), target)
+		counter(ch, d.bytesRemoved, float64(snap.BytesRemovedTotal), target)
+	}
+
 	if !snap.HasGood {
 		// Nothing measurable yet. Emitting zero here would be indistinguishable from a genuinely
 		// empty directory and would fire capacity alerts during the first walk of a large tree.
@@ -172,13 +182,11 @@ func (c *Collector) collectTarget(ch chan<- prometheus.Metric, snap *state.Snaps
 		gauge(ch, d.dedupSaved, float64(snap.DedupSavedBytes), target)
 		gauge(ch, d.dedupBroke, boolValue(snap.HardlinkTrackingExhausted), target)
 	}
-	if c.opts.Growth {
-		counter(ch, d.bytesAdded, float64(snap.BytesAddedTotal), target)
-		counter(ch, d.bytesRemoved, float64(snap.BytesRemovedTotal), target)
-		if snap.HasDelta {
-			gauge(ch, d.delta, float64(snap.DeltaBytes), target)
-			gauge(ch, d.deltaInterval, snap.DeltaIntervalSeconds, target)
-		}
+	if c.opts.Growth && snap.HasDelta {
+		// The delta itself is a measurement rather than history, so unlike the counters above it
+		// is withheld along with the size.
+		gauge(ch, d.delta, float64(snap.DeltaBytes), target)
+		gauge(ch, d.deltaInterval, snap.DeltaIntervalSeconds, target)
 	}
 }
 
