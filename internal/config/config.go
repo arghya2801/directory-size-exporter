@@ -125,6 +125,14 @@ type Config struct {
 	CollectorScanHistogram bool
 
 	// Web.
+	//
+	// These are registered here rather than taken from exporter-toolkit's own flag helper, which
+	// declares them without environment support. Leaving them to it would make the listen address
+	// — one of the first things anyone configures — the single setting unreachable from the
+	// environment or a config file, contradicting every other setting in this struct.
+	WebListenAddresses   []string
+	WebConfigFile        string
+	WebSystemdSocket     bool
 	WebTelemetryPath     string
 	WebEnableLifecycle   bool
 	WebReadyRequiresScan bool

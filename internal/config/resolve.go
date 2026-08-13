@@ -3,8 +3,11 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sort"
 	"time"
+
+	"github.com/prometheus/exporter-toolkit/web"
 
 	"github.com/local/directory-size-exporter/internal/fsstat"
 )
@@ -22,6 +25,9 @@ type Resolved struct {
 
 	// Capabilities is what the platform can actually measure.
 	Capabilities fsstat.Capability
+	// Web is the listener configuration in the shape exporter-toolkit expects, built from settings
+	// that went through the same flag, environment and YAML resolution as everything else.
+	Web *web.FlagConfig
 	// Disabled records features switched off because the platform cannot support them, so the
 	// audit can explain a missing metric without the operator reading the source.
 	Disabled map[string]string
@@ -84,6 +90,14 @@ func (r *Registry) Validate(caps fsstat.Capability, logger *slog.Logger) (*Resol
 	if cfg.WebTelemetryPath == "" || cfg.WebTelemetryPath[0] != '/' {
 		return nil, fmt.Errorf("--web.telemetry-path must start with /")
 	}
+	if len(cfg.WebListenAddresses) == 0 && !cfg.WebSystemdSocket {
+		return nil, fmt.Errorf("--web.listen-address is required unless --web.systemd-socket is set")
+	}
+	if cfg.WebSystemdSocket && runtime.GOOS != "linux" {
+		// Failing here rather than at listen time, so the reason is obvious rather than surfacing
+		// as an opaque socket error after startup appears to have succeeded.
+		return nil, fmt.Errorf("--web.systemd-socket is only supported on Linux, not %s", runtime.GOOS)
+	}
 	switch cfg.ScanIOPriority {
 	case "idle", "best-effort", "none":
 	default:
@@ -112,7 +126,16 @@ func (r *Registry) Validate(caps fsstat.Capability, logger *slog.Logger) (*Resol
 			cfg.ScanStaleAfter, cfg.ScanInterval)
 	}
 
-	resolved := &Resolved{Config: cfg, Capabilities: caps, Disabled: map[string]string{}}
+	resolved := &Resolved{
+		Config:       cfg,
+		Capabilities: caps,
+		Disabled:     map[string]string{},
+		Web: &web.FlagConfig{
+			WebListenAddresses: &cfg.WebListenAddresses,
+			WebConfigFile:      &cfg.WebConfigFile,
+			WebSystemdSocket:   &cfg.WebSystemdSocket,
+		},
+	}
 	for _, gate := range []struct {
 		name  string
 		value Tristate

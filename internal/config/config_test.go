@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -195,6 +196,90 @@ func TestNormalizeArgs_LeavesNonBooleanFlagsAlone(t *testing.T) {
 		if got[i] != args[i] {
 			t.Errorf("arg %d rewritten to %q, want %q", i, got[i], args[i])
 		}
+	}
+}
+
+// TestListenerSettingsAreFullyConfigurable covers the listener flags, which exporter-toolkit's own
+// helper declares without environment support. Leaving them to it would make the listen address —
+// among the first things anyone configures — the one setting unreachable from the environment or a
+// config file, silently contradicting every other setting.
+func TestListenerSettingsAreFullyConfigurable(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		registry, err := parse(t, []string{"--path.target=/x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := registry.Config().WebListenAddresses; len(got) != 1 || got[0] != ":9115" {
+			t.Errorf("listen addresses = %v, want [:9115]", got)
+		}
+	})
+
+	t.Run("flag, repeatable", func(t *testing.T) {
+		registry, err := parse(t, []string{
+			"--path.target=/x",
+			"--web.listen-address=127.0.0.1:9115",
+			"--web.listen-address=[::1]:9115",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := registry.Config().WebListenAddresses
+		if len(got) != 2 || got[0] != "127.0.0.1:9115" || got[1] != "[::1]:9115" {
+			t.Errorf("listen addresses = %v, want both entries", got)
+		}
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv(EnvName("web.listen-address"), "0.0.0.0:9999")
+		registry, err := parse(t, []string{"--path.target=/x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := registry.Config().WebListenAddresses; len(got) != 1 || got[0] != "0.0.0.0:9999" {
+			t.Errorf("listen addresses = %v, want [0.0.0.0:9999]", got)
+		}
+	})
+
+	t.Run("yaml", func(t *testing.T) {
+		configPath := writeConfig(t, "targets:\n  - /x\nweb:\n  listen-address:\n    - 10.0.0.1:9200\n  config.file: /etc/web.yml\n")
+		registry, err := parse(t, []string{"--config.file=" + configPath})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := registry.Config()
+		if got := cfg.WebListenAddresses; len(got) != 1 || got[0] != "10.0.0.1:9200" {
+			t.Errorf("listen addresses = %v, want [10.0.0.1:9200]", got)
+		}
+		if cfg.WebConfigFile != "/etc/web.yml" {
+			t.Errorf("web config file = %q, want /etc/web.yml", cfg.WebConfigFile)
+		}
+	})
+
+	t.Run("exposed to the toolkit after validation", func(t *testing.T) {
+		resolved, err := validate(t, []string{"--path.target=/x", "--web.listen-address=:9300"}, allCaps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resolved.Web == nil || len(*resolved.Web.WebListenAddresses) != 1 {
+			t.Fatalf("toolkit config not populated: %+v", resolved.Web)
+		}
+		if (*resolved.Web.WebListenAddresses)[0] != ":9300" {
+			t.Errorf("toolkit listen address = %v, want :9300", *resolved.Web.WebListenAddresses)
+		}
+	})
+}
+
+func TestValidate_SystemdSocketIsLinuxOnly(t *testing.T) {
+	_, err := validate(t, []string{"--path.target=/x", "--web.systemd-socket=true"}, allCaps)
+	if runtime.GOOS == "linux" {
+		if err != nil {
+			t.Fatalf("systemd socket rejected on linux: %v", err)
+		}
+		return
+	}
+	// Failing at startup beats an opaque socket error after startup appears to have succeeded.
+	if err == nil || !strings.Contains(err.Error(), "systemd-socket") {
+		t.Fatalf("error = %v, want a refusal naming the flag", err)
 	}
 }
 

@@ -23,7 +23,6 @@ import (
 	promslogflag "github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
-	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 
 	"github.com/local/directory-size-exporter/internal/collector"
 	"github.com/local/directory-size-exporter/internal/config"
@@ -53,7 +52,8 @@ func run() error {
 
 	registry := config.NewRegistry()
 	registry.RegisterFlags(app)
-	webFlags := webflag.AddFlags(app, ":9115")
+	// The listener flags are declared by the registry rather than exporter-toolkit's helper, which
+	// offers no environment-variable support. Registering both would collide on the same flag names.
 	logConfig := &promslog.Config{}
 	promslogflag.AddFlags(app, logConfig)
 
@@ -77,7 +77,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return exporter.serve(webFlags, logger)
+	return exporter.serve(resolved.Web, logger)
 }
 
 // application holds the wired-together components.

@@ -141,6 +141,12 @@ func NewRegistry() *Registry {
 	add(&field{name: "collector.scan-histogram", kind: kindBool, ptr: &cfg.CollectorScanHistogram, def: "false",
 		help: "Expose the distribution of scan durations by outcome. Off by default: it costs a fixed ~90 series regardless of target count, which on a small deployment is more than the rest of the exporter combined, and scans are too infrequent for quantiles to say much. last_scan_duration_seconds and scans_total cover day-to-day needs."})
 
+	add(&field{name: "web.listen-address", kind: kindStrings, ptr: &cfg.WebListenAddresses, def: ":9115",
+		help: "Address to expose metrics on. Repeat for multiple. Examples: :9115, 127.0.0.1:9115, [::1]:9115."})
+	add(&field{name: "web.config.file", kind: kindString, ptr: &cfg.WebConfigFile, def: "",
+		help: "TLS and authentication configuration, in the exporter-toolkit web-configuration format. Without it the endpoint is plain HTTP with no authentication."})
+	add(&field{name: "web.systemd-socket", kind: kindBool, ptr: &cfg.WebSystemdSocket, def: "false",
+		help: "Use systemd socket activation instead of listening on an address. Linux only."})
 	add(&field{name: "web.telemetry-path", kind: kindString, ptr: &cfg.WebTelemetryPath, def: "/metrics",
 		help: "Path under which to expose metrics."})
 	add(&field{name: "web.enable-lifecycle", kind: kindBool, ptr: &cfg.WebEnableLifecycle, def: "false",

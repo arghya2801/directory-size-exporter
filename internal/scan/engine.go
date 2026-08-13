@@ -260,7 +260,7 @@ func (e *Engine) prepareRoot(target *targetScan) (state.Outcome, bool) {
 	if st.Mode&fs.ModeSymlink != 0 {
 		// Target resolution is expected to have followed this already. Reaching here means the
 		// configured path is an unresolved symlink, which the previous implementation measured as
-		// zero bytes while reporting success â€” a failure that looked healthy on every dashboard.
+		// zero bytes while reporting success — a failure that looked healthy on every dashboard.
 		target.recordError(errUnresolvedSymlink)
 		return state.OutcomeRootError, false
 	}
@@ -422,7 +422,7 @@ func (e *Engine) waitForTokens(ctx context.Context, n int) error {
 // Each worker keeps a private LIFO stack and only donates to the shared queue once it has plenty
 // of work. LIFO means depth-first, which keeps the working set small and the directory-entry cache
 // hot. A worker that cannot donate keeps the work instead of blocking, so no worker ever waits to
-// enqueue â€” which is precisely the deadlock a bounded channel with recursive sends would hit.
+// enqueue — which is precisely the deadlock a bounded channel with recursive sends would hit.
 type pool struct {
 	mu        sync.Mutex
 	cond      *sync.Cond

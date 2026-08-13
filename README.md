@@ -47,9 +47,13 @@ through all three, and the startup log prints each value with the source it came
 
 ```yaml
 # --config.file=/etc/directory-size-exporter.yml
-targets:
-  - /var/log/app
-  - /data/logs/venue-*
+#
+# Note the nesting under "path:" rather than a top-level "targets:" list: "targets:" is also
+# the prefix for the targets.* settings, and YAML cannot have one key be both a list and a map.
+path:
+  target:
+    - /var/log/app
+    - /data/logs/venue-*
 scan:
   interval: 5m
   timeout: 30m
@@ -57,7 +61,15 @@ scan:
   dedup-hardlinks: true
 collector:
   file-counts: true
+web:
+  listen-address:
+    - :9115
 ```
+
+The listen address, `--web.config.file` and `--web.systemd-socket` are declared by this exporter
+rather than taken from exporter-toolkit's flag helper, which offers no environment support. That
+would otherwise have left the listen address — among the first things anyone configures — as the
+one setting unreachable from the environment or a config file.
 
 Boolean flags accept both `--collector.file-counts` and `--collector.file-counts=true`, and both
 `--no-collector.file-counts` and `--collector.file-counts=false`.
