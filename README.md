@@ -134,102 +134,110 @@ worker pool is effectively dead and the exporter needs restarting once the mount
 
 ## Metrics
 
-`T` = `{target_path}`. `F` = `{mountpoint, device, fstype}`.
+Labels are spelled out in full below. Three appear repeatedly:
+
+- **`target_path`** — the resolved absolute path of a monitored directory. One series per target.
+- **`mountpoint`, `device`, `fstype`** — identify a *filesystem*, not a directory. Several targets
+  usually share one, so these series appear once per filesystem, not once per target. `device` is
+  the kernel device id (`8:1` on Linux, the volume root on Windows), not `/dev/sda1`.
+- **`result`** and **`class`** — enumerated values, listed under their tables.
 
 ### Size
 
-| Metric | Type | Labels | Enabled by |
-|---|---|---|---|
-| `dir_exporter_size_bytes` | gauge | T | always |
-| `dir_exporter_disk_usage_bytes` | gauge | T | `--collector.disk-usage` (needs allocated-block support) |
-| `dir_exporter_files` | gauge | T | `--collector.file-counts` |
-| `dir_exporter_directories` | gauge | T | `--collector.file-counts` |
-| `dir_exporter_hardlinked_files` | gauge | T | `--scan.dedup-hardlinks` |
-| `dir_exporter_hardlink_dedup_saved_bytes` | gauge | T | `--scan.dedup-hardlinks` |
-| `dir_exporter_hardlink_tracking_exhausted` | gauge | T | `--scan.dedup-hardlinks` |
-
-`size_bytes` is logical length; `disk_usage_bytes` is space actually allocated. They differ for
-sparse and compressed files, and `disk_usage_bytes` is the one to use for capacity planning.
+| Metric | Type | Labels | What it tells you | Enabled by |
+|---|---|---|---|---|
+| `dir_exporter_size_bytes` | gauge | `target_path` | Total logical size of all regular files under the directory. The headline number. **Absent**, not zero, until a scan completes cleanly. | always |
+| `dir_exporter_disk_usage_bytes` | gauge | `target_path` | Space the files actually occupy on disk. Lower than `size_bytes` for sparse or compressed files, slightly higher for many tiny ones. **Use this for capacity planning.** | `--collector.disk-usage` (needs allocated-block support, i.e. Linux) |
+| `dir_exporter_files` | gauge | `target_path` | How many regular files. A sudden jump with flat bytes means many small files — often a rotation misconfiguration. | `--collector.file-counts` |
+| `dir_exporter_directories` | gauge | `target_path` | How many subdirectories. Mostly useful for spotting runaway directory creation. | `--collector.file-counts` |
+| `dir_exporter_hardlinked_files` | gauge | `target_path` | Files with more than one hard link. Zero on most log trees; non-zero means an archiving scheme is in play. | `--scan.dedup-hardlinks` |
+| `dir_exporter_hardlink_dedup_saved_bytes` | gauge | `target_path` | Bytes excluded from `size_bytes` because that file was already counted via another link. Shows how much dedup is changing the number. | `--scan.dedup-hardlinks` |
+| `dir_exporter_hardlink_tracking_exhausted` | gauge 0/1 | `target_path` | `1` means the dedup memory cap was hit and duplicates are being counted again, so the size now **overstates** reality. Alert on this. | `--scan.dedup-hardlinks` |
 
 ### Growth (`--collector.growth`, on by default)
 
-| Metric | Type | Labels |
-|---|---|---|
-| `dir_exporter_size_delta_bytes` | gauge (signed) | T |
-| `dir_exporter_size_delta_interval_seconds` | gauge | T |
-| `dir_exporter_bytes_added_total` | counter | T |
-| `dir_exporter_bytes_removed_total` | counter | T |
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `dir_exporter_size_delta_bytes` | gauge (signed) | `target_path` | Change in size since the previous **completed** scan. Negative means the directory shrank. Absent until two scans have completed. |
+| `dir_exporter_size_delta_interval_seconds` | gauge | `target_path` | The time the delta above spans. Divide the delta by this to get bytes/second. |
+| `dir_exporter_bytes_added_total` | counter | `target_path` | Cumulative growth since the exporter started. `rate()` over this gives a smoothed growth rate. |
+| `dir_exporter_bytes_removed_total` | counter | `target_path` | Cumulative shrinkage. Compare against `bytes_added_total` to see whether rotation is keeping up with writes. |
 
 The delta spans **completed** scans, which may be several intervals apart if scans failed in
-between. Always divide by `size_delta_interval_seconds`, never by the configured scan interval.
+between. Always divide by `size_delta_interval_seconds`, never by the configured scan interval — a
+run of failed scans would otherwise make growth look several times faster than it is.
 
 ### Filesystem context (`--collector.filesystem`)
 
-| Metric | Type | Labels |
-|---|---|---|
-| `dir_exporter_filesystem_size_bytes` | gauge | F |
-| `dir_exporter_filesystem_free_bytes` | gauge | F |
-| `dir_exporter_filesystem_avail_bytes` | gauge | F |
-| `dir_exporter_filesystem_files` | gauge | F (Linux) |
-| `dir_exporter_filesystem_files_free` | gauge | F (Linux) |
-| `dir_exporter_target_mountpoint_info` | gauge = 1 | `{target_path, mountpoint, device, fstype}` |
-| `dir_exporter_statfs_timeouts_total` | counter | T |
-| `dir_exporter_filesystem_info_unavailable` | gauge | T |
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `dir_exporter_filesystem_size_bytes` | gauge | `mountpoint`, `device`, `fstype` | Total capacity of the volume holding the target. |
+| `dir_exporter_filesystem_free_bytes` | gauge | `mountpoint`, `device`, `fstype` | Free space including the root-reserved portion. |
+| `dir_exporter_filesystem_avail_bytes` | gauge | `mountpoint`, `device`, `fstype` | Free space an unprivileged process can actually use. **This is the one to alert on** — it is what runs out first. |
+| `dir_exporter_filesystem_files` | gauge | `mountpoint`, `device`, `fstype` | Total inodes. A volume can hit its inode limit with space to spare. Linux only. |
+| `dir_exporter_filesystem_files_free` | gauge | `mountpoint`, `device`, `fstype` | Free inodes. Linux only. |
+| `dir_exporter_target_mountpoint_info` | gauge = 1 | `target_path`, `mountpoint`, `device`, `fstype` | Maps a target to its filesystem. Carries no value itself — it exists so you can join directory metrics to volume metrics. |
+| `dir_exporter_statfs_timeouts_total` | counter | `target_path` | Capacity queries abandoned after timing out. Rising means a hung mount. |
+| `dir_exporter_filesystem_info_unavailable` | gauge 0/1 | `target_path` | `1` means capacity could not be read at the last refresh, so the volume metrics are missing for this target rather than stale. |
 
-Capacity is emitted once per filesystem, not once per target. `target_mountpoint_info` carries the
-join.
+Capacity is emitted once per filesystem, not once per target — several targets commonly share a
+volume, and duplicating capacity per target would create conflicting series.
+`target_mountpoint_info` is the join key (see [Useful queries](#useful-queries)).
 
 ### Scan status
 
-| Metric | Type | Labels |
-|---|---|---|
-| `dir_exporter_last_scan_success` | gauge | T |
-| `dir_exporter_last_scan_partial` | gauge | T |
-| `dir_exporter_target_present` | gauge | T |
-| `dir_exporter_scan_age_seconds` | gauge | T |
-| `dir_exporter_last_good_scan_timestamp_seconds` | gauge | T |
-| `dir_exporter_last_scan_attempt_timestamp_seconds` | gauge | T |
-| `dir_exporter_scan_in_progress` | gauge | T |
-| `dir_exporter_current_scan_duration_seconds` | gauge | T |
-| `dir_exporter_last_scan_duration_seconds` | gauge | T |
-| `dir_exporter_scans_total` | counter | `{target_path, result}` |
-| `dir_exporter_scan_duration_seconds` | histogram | `{result}` (`--collector.scan-histogram`, **off** by default) |
-| `dir_exporter_scan_skipped_total` | counter | — |
-| `dir_exporter_abandoned_scan_workers` | gauge | — |
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `dir_exporter_last_scan_success` | gauge 0/1 | `target_path` | Whether the most recent scan completed with no errors. Present from process start, so `0` means "not scanned yet or failed" while an *absent* series means the exporter is down. |
+| `dir_exporter_last_scan_partial` | gauge 0/1 | `target_path` | `1` means the last scan is known to be incomplete, so the published size is older than the last attempt. |
+| `dir_exporter_target_present` | gauge 0/1 | `target_path` | Whether the directory still existed at the last attempt. `0` with a retained size means it was deleted or unmounted. |
+| `dir_exporter_scan_age_seconds` | gauge | `target_path` | Seconds since the last **successful** scan. Grows without bound while scans keep failing. **The single best staleness alert.** |
+| `dir_exporter_last_good_scan_timestamp_seconds` | gauge | `target_path` | Unix time of the last successful scan — when the published size was actually measured. |
+| `dir_exporter_last_scan_attempt_timestamp_seconds` | gauge | `target_path` | Unix time of the last attempt, successful or not. Compare with the above to see how long it has been failing. |
+| `dir_exporter_scan_in_progress` | gauge 0/1 | `target_path` | Whether this target is being walked right now. |
+| `dir_exporter_current_scan_duration_seconds` | gauge | `target_path` | How long the in-flight scan has been running, `0` when idle. Lets you distinguish a slow scan from a stalled one. |
+| `dir_exporter_last_scan_duration_seconds` | gauge | `target_path` | How long the last scan took. Use this to size `--scan.timeout` and `--scan.interval`. |
+| `dir_exporter_scans_total` | counter | `target_path`, `result` | Scans by outcome. `rate()` on `result="partial"` or `"timeout"` shows how often a target is failing. |
+| `dir_exporter_scan_duration_seconds` | histogram | `result` | Distribution of scan durations. See the note below. |
+| `dir_exporter_scan_skipped_total` | counter | — | Cycles skipped because the previous one was still running. Rising means `--scan.interval` is shorter than a scan takes. |
+| `dir_exporter_abandoned_scan_workers` | gauge | — | Workers that never exited, presumed stuck on a hung mount. Sustained values at or above `--scan.concurrency` mean the worker pool is dead and the exporter needs restarting. |
 
 `result` is one of `complete`, `partial`, `timeout`, `cancelled`, `missing`, `root_error`.
 
-The duration histogram is **off by default**. It costs about 90 series — thirteen buckets plus sum
-and count, per outcome — and that cost is fixed regardless of how many targets you monitor, so on a
-small deployment it is larger than everything else the exporter emits combined. Scans also run
-every few minutes at most, which is far too few samples for quantiles to mean much.
-`dir_exporter_last_scan_duration_seconds` gives you the current duration per target and
-`dir_exporter_scans_total` gives you outcome rates; reach for the histogram only when you
-specifically want duration *distributions* over long windows. When enabled, buckets appear for an
-outcome the first time it actually occurs.
+The duration histogram is **off by default** (`--collector.scan-histogram`). It costs about 90
+series — thirteen buckets plus sum and count, per outcome — and that cost is fixed regardless of
+how many targets you monitor, so on a small deployment it is larger than everything else the
+exporter emits combined. Scans also run every few minutes at most, which is far too few samples for
+quantiles to mean much. `last_scan_duration_seconds` gives current duration per target and
+`scans_total` gives outcome rates; reach for the histogram only when you specifically want duration
+*distributions* over long windows. When enabled, buckets appear for an outcome the first time it
+actually occurs.
 
 ### Errors and scan cost
 
-| Metric | Type | Labels |
-|---|---|---|
-| `dir_exporter_last_scan_errors` | gauge | `{target_path, class}` |
-| `dir_exporter_scan_errors_total` | counter | `{target_path, class}` |
-| `dir_exporter_scan_vanished_files_total` | counter | T |
-| `dir_exporter_scan_entries_total` | counter | T |
-| `dir_exporter_scan_stat_calls_total` | counter | T |
-| `dir_exporter_scan_dirs_read_total` | counter | T |
-| `dir_exporter_scan_skipped_other_filesystem_total` | counter | T |
-| `dir_exporter_scan_rate_limit_wait_seconds_total` | counter | — |
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `dir_exporter_last_scan_errors` | gauge | `target_path`, `class` | Errors in the most recent scan, grouped by kind. Resets each scan, so it reflects the current state rather than history. |
+| `dir_exporter_scan_errors_total` | counter | `target_path`, `class` | Cumulative errors by kind. `rate()` shows whether a problem is ongoing or was a one-off. |
+| `dir_exporter_scan_vanished_files_total` | counter | `target_path` | Files that disappeared between being listed and being measured. **Not an error** — this is normal log rotation. A sudden spike means unusually aggressive deletion. |
+| `dir_exporter_scan_entries_total` | counter | `target_path` | Directory entries examined. Roughly the size of the job, useful for judging scan cost. |
+| `dir_exporter_scan_stat_calls_total` | counter | `target_path` | Metadata lookups issued — the dominant per-file syscall cost. Divide by duration for an effective operations-per-second rate. |
+| `dir_exporter_scan_dirs_read_total` | counter | `target_path` | Directories opened and read. |
+| `dir_exporter_scan_skipped_other_filesystem_total` | counter | `target_path` | Directories skipped for being on a different filesystem. Non-zero means nested mounts exist under the target. |
+| `dir_exporter_scan_rate_limit_wait_seconds_total` | counter | — | Time workers spent waiting for the rate limiter. Zero means `--scan.rate-limit` is not binding; rising steeply means it is throttling hard. |
 
 `class` is one of `permission`, `not_found`, `io`, `loop`, `name_too_long`, `too_many_files`,
-`other`. Files that disappear mid-scan are counted as *vanished*, not as errors — during log
-rotation that is routine, and treating it as a fault would leave a busy directory permanently
-unable to publish a size.
+`other`. `too_many_files` means the exporter ran out of file descriptors — a problem with the
+exporter's own limits, not with the directory.
 
 ### Exporter and targets
 
-`dir_exporter_build_info`, `dir_exporter_platform_capability{capability}`,
-`dir_exporter_targets_resolved`, plus `go_*` and `process_*` (`--collector.self`, on by default).
+| Metric | Type | Labels | What it tells you |
+|---|---|---|---|
+| `dir_exporter_build_info` | gauge = 1 | `version`, `revision`, `branch`, `goversion`, … | Which build is running. Value is always 1; the information is in the labels. |
+| `dir_exporter_platform_capability` | gauge 0/1 | `capability` | What this binary can actually measure on this host: `alloc_bytes`, `inode`, `fs_bytes`, `fs_inodes`, `mountpoint`. A `0` explains why a metric is missing. Assert these are `1` on production hosts to catch a mis-built binary. |
+| `dir_exporter_targets_resolved` | gauge | — | How many directories are currently monitored. Watch for a glob quietly matching nothing, or matching far more than intended. |
+| `go_*`, `process_*` | various | — | The exporter's own memory, goroutines and CPU (`--collector.self`, on by default). |
 
 ## Useful queries
 
